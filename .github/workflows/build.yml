@@ -12,7 +12,7 @@ jobs:
       - uses: actions/checkout@v6
 
       - name: Build .eap package
-        run: docker buildx build --build-arg ARCH=aarch64 --output type=local,dest=build .
+        run: docker buildx build --build-arg ARCH=aarch64 --target artifact --output type=local,dest=build .
 
       - name: Locate package
         run: find build -name "*.eap" -exec ls -la {} \;
@@ -21,5 +21,5 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: sds3sync-eap
-          path: build/opt/app/*.eap
+          path: build/*.eap
           if-no-files-found: error
