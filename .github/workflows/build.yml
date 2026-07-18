@@ -18,7 +18,7 @@ jobs:
         run: find build -name "*.eap" -exec ls -la {} \;
 
       - name: Upload .eap artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: sds3sync-eap
           path: build/*.eap
