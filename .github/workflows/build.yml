@@ -1,0 +1,25 @@
+name: Build ACAP
+
+on:
+  push:
+    branches: [master, main]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Build .eap package
+        run: docker buildx build --build-arg ARCH=aarch64 --output type=local,dest=build .
+
+      - name: Locate package
+        run: find build -name "*.eap" -exec ls -la {} \;
+
+      - name: Upload .eap artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: sds3sync-eap
+          path: build/opt/app/*.eap
+          if-no-files-found: error

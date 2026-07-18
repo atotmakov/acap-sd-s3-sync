@@ -1,0 +1,36 @@
+{
+    "schemaVersion": "1.7.1",
+    "resources": {
+        "linux": {
+            "user": {
+                "groups": ["storage"]
+            }
+        }
+    },
+    "acapPackageConf": {
+        "setup": {
+            "appName": "sds3sync",
+            "friendlyName": "SD to S3 Sync",
+            "vendor": "atotmakov",
+            "embeddedSdkVersion": "3.0",
+            "runMode": "respawn",
+            "version": "0.1.0"
+        },
+        "configuration": {
+            "paramConfig": [
+                { "name": "Endpoint",      "default": "",                               "type": "string" },
+                { "name": "Bucket",        "default": "cctv",                           "type": "string" },
+                { "name": "Region",        "default": "us-east-1",                      "type": "string" },
+                { "name": "AccessKey",     "default": "",                               "type": "string" },
+                { "name": "SecretKey",     "default": "",                               "type": "string" },
+                { "name": "Prefix",        "default": "axis-b8a44f6c2746/",             "type": "string" },
+                { "name": "SourceDir",     "default": "/var/spool/storage/SD_DISK",     "type": "string" },
+                { "name": "ScheduleId",    "default": "com.axis.schedules.genid.id-1",  "type": "string" },
+                { "name": "Extensions",    "default": ".mkv",                           "type": "string" },
+                { "name": "MinAgeSeconds", "default": "120",                            "type": "string" },
+                { "name": "PathStyle",     "default": "yes",                            "type": "string" },
+                { "name": "InsecureTLS",   "default": "no",                             "type": "string" }
+            ]
+        }
+    }
+}

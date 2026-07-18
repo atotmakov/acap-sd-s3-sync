@@ -1,0 +1,90 @@
+# sds3sync — Axis ACAP: push SD-card recordings to S3-compatible storage
+
+Native ACAP application for Axis cameras (built for AXIS M3085-V, Ambarella
+CV25, aarch64, AXIS OS 12.x) that uploads finished recordings from the SD card
+to an S3-compatible object store (MinIO, Backblaze B2, or any SigV4 endpoint).
+
+## Design
+
+- **Trigger**: subscribes to the camera's own recurring Pulse events
+  (`tns1:UserAlarm/tnsaxis:Recurring/Pulse`). Create a pulse in the camera UI
+  (System → Events → Schedules → add Pulse) or via the Event1 SOAP service;
+  each pulse fires one sync pass. On the target camera two pulses already
+  exist: `com.axis.schedules.genid.id-1` ("oneminpulse", every minute — the
+  default) and `com.axis.schedules.genid.id-0` ("each_minute").
+- **Sync pass**: recursively scans `SourceDir` (default
+  `/var/spool/storage/SD_DISK`), uploads every file matching `Extensions`
+  whose mtime is at least `MinAgeSeconds` old (default 120 s — skips chunks
+  still being written) and that is not already recorded in the local state
+  file. Upload once, keep on SD; the camera's own FIFO cleanup reclaims space.
+- **State**: `/usr/local/packages/sds3sync/localdata/uploaded.txt`, one
+  `size<TAB>relative-path` line per uploaded file. Delete the file and restart
+  the app to re-upload everything. If a file's size changes after upload
+  (should not happen for finalized chunks) it is re-uploaded and overwritten.
+- **Uploads**: HTTPS PUT with AWS Signature V4, `UNSIGNED-PAYLOAD`, streamed
+  via libcurl (no file buffering in RAM). A pass aborts after 3 consecutive
+  failures and retries on the next pulse. One pass runs at a time; overlapping
+  pulses are skipped.
+
+## Parameters (Apps → SD to S3 Sync → Settings)
+
+| Param | Default | Meaning |
+|---|---|---|
+| `Endpoint` | *(empty — required)* | e.g. `https://minio.example.com:9000` |
+| `Bucket` | `cctv` | Target bucket (must exist) |
+| `Region` | `us-east-1` | SigV4 region string (MinIO accepts the default) |
+| `AccessKey` / `SecretKey` | *(empty — required)* | Credentials. Stored as plain ACAP params — create a scoped, write-only key |
+| `Prefix` | `axis-b8a44f6c2746/` | Object key prefix |
+| `SourceDir` | `/var/spool/storage/SD_DISK` | Directory tree to sync |
+| `ScheduleId` | `com.axis.schedules.genid.id-1` | Pulse schedule to react to; empty = any pulse |
+| `Extensions` | `.mkv` | Comma-separated suffix list |
+| `MinAgeSeconds` | `120` | Skip files modified more recently than this |
+| `PathStyle` | `yes` | `yes` = `endpoint/bucket/key` (MinIO); `no` = virtual-host style |
+| `InsecureTLS` | `no` | `yes` = skip TLS cert verification (self-signed MinIO) |
+
+The app starts idle if `Endpoint`/`AccessKey`/`SecretKey` are unset —
+configure them, then restart the app.
+
+## Build
+
+Requires Docker (the ACAP Native SDK toolchain is distributed as a Docker
+image). From this directory:
+
+```bash
+docker buildx build --build-arg ARCH=aarch64 --output type=local,dest=build .
+# .eap package lands in build/opt/app/
+```
+
+Pin `--build-arg SDK_VERSION=` to a specific `axisecp/acap-native-sdk` tag if
+`latest` breaks; AXIS OS 12.x pairs with SDK 12.x.
+
+## Install
+
+Camera UI: Apps → `+ Add app` → pick the `.eap`. Or via VAPIX:
+
+```bash
+curl --digest -u root:<pw> -F packfil=@build/opt/app/sds3sync_0_1_0_aarch64.eap \
+  "http://<camera-ip>/axis-cgi/applications/upload.cgi"
+curl --digest -u root:<pw> "http://<camera-ip>/axis-cgi/applications/control.cgi?action=start&package=sds3sync"
+```
+
+## Logs / troubleshooting
+
+App logs go to the camera syslog:
+
+```bash
+curl -s --digest -u root:<pw> "http://<camera-ip>/axis-cgi/admin/systemlog.cgi" | grep sds3sync
+```
+
+- `idle: waiting for configuration` — set Endpoint/AccessKey/SecretKey, restart app.
+- Uploads failing with HTTP 403 — check clock (SigV4 is time-sensitive; NTP
+  must work), credentials, and bucket policy.
+- No SD access (`g_dir_open` failures / zero files found) — the manifest
+  requests the `storage` Linux group; AXIS OS 12 tightened ACAP storage
+  sandboxing, so if the app still cannot read
+  `/var/spool/storage/SD_DISK`, this is the first thing to investigate
+  (see manifest `resources.linux.user.groups`).
+- SigV4 here signs only `host`, `x-amz-content-sha256`, `x-amz-date` with
+  `UNSIGNED-PAYLOAD` — fine for MinIO/B2 over TLS; AWS S3 proper also accepts
+  it, but signed-payload support would need to be added for policies that
+  require `x-amz-content-sha256` to be a real digest.

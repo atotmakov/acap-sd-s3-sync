@@ -1,0 +1,416 @@
+/*
+ * sds3sync — push finished SD-card recordings to S3-compatible storage.
+ *
+ * Trigger model: subscribes to the camera's recurring Pulse events
+ * (tns1:UserAlarm/tnsaxis:Recurring/Pulse, optionally filtered to one
+ * schedule id). Each pulse starts one sync pass: walk SourceDir, upload
+ * every finished file (mtime older than MinAgeSeconds, extension in
+ * Extensions) that is not yet in the local upload state, then record it so
+ * it is uploaded exactly once. Files are never deleted from the SD card —
+ * the camera's own FIFO cleanup reclaims space.
+ */
+#include <glib-unix.h>
+#include <glib.h>
+#include <glib/gstdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <sys/stat.h>
+#include <syslog.h>
+#include <time.h>
+
+#include <axsdk/axevent.h>
+#include <axsdk/axparameter.h>
+#include <curl/curl.h>
+
+#include "s3put.h"
+
+#define APP_NAME "sds3sync"
+
+typedef struct {
+    gchar *endpoint;
+    gchar *bucket;
+    gchar *region;
+    gchar *access_key;
+    gchar *secret_key;
+    gchar *prefix;
+    gchar *source_dir;
+    gchar *schedule_id;
+    gchar **extensions;   /* NULL-terminated, each like ".mkv" */
+    gint min_age;
+    gboolean path_style;
+    gboolean insecure;
+} Config;
+
+static Config cfg;
+static GMainLoop *loop;
+static GHashTable *uploaded; /* rel path (owned) -> size string (owned) */
+static gchar *state_path;
+static gint sync_running = 0;
+
+/* ------------------------------------------------------------------ */
+/* Config                                                              */
+/* ------------------------------------------------------------------ */
+
+static gchar *get_param(AXParameter *p, const char *name, const char *fallback)
+{
+    gchar *v = NULL;
+    GError *err = NULL;
+    if (!ax_parameter_get(p, name, &v, &err)) {
+        if (err)
+            g_error_free(err);
+        v = g_strdup(fallback);
+    }
+    if (v)
+        g_strstrip(v);
+    return v;
+}
+
+static gboolean param_yes(const gchar *v)
+{
+    return v && (g_ascii_strcasecmp(v, "yes") == 0 ||
+                 g_ascii_strcasecmp(v, "true") == 0 || strcmp(v, "1") == 0);
+}
+
+static gboolean load_config(void)
+{
+    GError *err = NULL;
+    AXParameter *p = ax_parameter_new(APP_NAME, &err);
+    if (p == NULL) {
+        syslog(LOG_ERR, "ax_parameter_new failed: %s",
+               err ? err->message : "unknown");
+        g_clear_error(&err);
+        return FALSE;
+    }
+
+    cfg.endpoint = get_param(p, "Endpoint", "");
+    cfg.bucket = get_param(p, "Bucket", "cctv");
+    cfg.region = get_param(p, "Region", "us-east-1");
+    cfg.access_key = get_param(p, "AccessKey", "");
+    cfg.secret_key = get_param(p, "SecretKey", "");
+    cfg.prefix = get_param(p, "Prefix", "");
+    cfg.source_dir = get_param(p, "SourceDir", "/var/spool/storage/SD_DISK");
+    cfg.schedule_id = get_param(p, "ScheduleId", "");
+
+    gchar *ext = get_param(p, "Extensions", ".mkv");
+    cfg.extensions = g_strsplit(ext, ",", -1);
+    for (gchar **e = cfg.extensions; *e; e++)
+        g_strstrip(*e);
+    g_free(ext);
+
+    gchar *age = get_param(p, "MinAgeSeconds", "120");
+    cfg.min_age = atoi(age);
+    if (cfg.min_age < 0)
+        cfg.min_age = 0;
+    g_free(age);
+
+    gchar *ps = get_param(p, "PathStyle", "yes");
+    cfg.path_style = param_yes(ps);
+    g_free(ps);
+
+    gchar *ins = get_param(p, "InsecureTLS", "no");
+    cfg.insecure = param_yes(ins);
+    g_free(ins);
+
+    /* strip trailing slashes so path joins stay predictable */
+    size_t n = strlen(cfg.endpoint);
+    while (n > 0 && cfg.endpoint[n - 1] == '/')
+        cfg.endpoint[--n] = '\0';
+    n = strlen(cfg.source_dir);
+    while (n > 1 && cfg.source_dir[n - 1] == '/')
+        cfg.source_dir[--n] = '\0';
+
+    ax_parameter_free(p);
+
+    if (cfg.endpoint[0] == '\0' || cfg.access_key[0] == '\0' ||
+        cfg.secret_key[0] == '\0') {
+        syslog(LOG_WARNING,
+               "Endpoint/AccessKey/SecretKey not configured yet — "
+               "set app parameters, then restart the app");
+        return FALSE;
+    }
+    return TRUE;
+}
+
+/* ------------------------------------------------------------------ */
+/* Upload state (rel path -> size at upload time)                      */
+/* ------------------------------------------------------------------ */
+
+static void load_state(void)
+{
+    uploaded = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, g_free);
+    gchar *content = NULL;
+    if (!g_file_get_contents(state_path, &content, NULL, NULL))
+        return;
+    gchar **lines = g_strsplit(content, "\n", -1);
+    for (gchar **l = lines; *l; l++) {
+        gchar *tab = strchr(*l, '\t');
+        if (tab == NULL)
+            continue;
+        *tab = '\0';
+        /* line: "<size>\t<rel path>"; later entries win */
+        g_hash_table_replace(uploaded, g_strdup(tab + 1), g_strdup(*l));
+    }
+    g_strfreev(lines);
+    g_free(content);
+    syslog(LOG_INFO, "loaded %u uploaded-file records",
+           g_hash_table_size(uploaded));
+}
+
+static void append_state(const gchar *rel, const gchar *size_str)
+{
+    FILE *fp = fopen(state_path, "a");
+    if (fp == NULL) {
+        syslog(LOG_ERR, "cannot append state file %s", state_path);
+        return;
+    }
+    fprintf(fp, "%s\t%s\n", size_str, rel);
+    fclose(fp);
+}
+
+/* ------------------------------------------------------------------ */
+/* Sync pass                                                           */
+/* ------------------------------------------------------------------ */
+
+static gchar *urlencode_key(const char *key)
+{
+    GString *s = g_string_new(NULL);
+    for (const unsigned char *p = (const unsigned char *)key; *p; p++) {
+        if (g_ascii_isalnum(*p) || *p == '-' || *p == '.' || *p == '_' ||
+            *p == '~' || *p == '/')
+            g_string_append_c(s, (gchar)*p);
+        else
+            g_string_append_printf(s, "%%%02X", *p);
+    }
+    return g_string_free(s, FALSE);
+}
+
+static gboolean ext_allowed(const gchar *name)
+{
+    for (gchar **e = cfg.extensions; *e; e++) {
+        if (**e == '\0')
+            continue;
+        if (g_str_has_suffix(name, *e))
+            return TRUE;
+    }
+    return FALSE;
+}
+
+struct pass_stats {
+    guint uploaded;
+    guint skipped;
+    guint failed;
+    guint consecutive_failures;
+};
+
+static void scan_dir(const gchar *dir, time_t now, const S3Cfg *s3,
+                     struct pass_stats *st)
+{
+    if (st->consecutive_failures >= 3)
+        return; /* endpoint is unhappy — stop the pass, retry on next pulse */
+
+    GDir *d = g_dir_open(dir, 0, NULL);
+    if (d == NULL)
+        return;
+
+    const gchar *name;
+    while ((name = g_dir_read_name(d)) != NULL) {
+        if (st->consecutive_failures >= 3)
+            break;
+
+        gchar *full = g_build_filename(dir, name, NULL);
+        if (g_file_test(full, G_FILE_TEST_IS_SYMLINK)) {
+            g_free(full);
+            continue;
+        }
+        if (g_file_test(full, G_FILE_TEST_IS_DIR)) {
+            scan_dir(full, now, s3, st);
+            g_free(full);
+            continue;
+        }
+        if (!ext_allowed(name)) {
+            g_free(full);
+            continue;
+        }
+
+        GStatBuf sb;
+        if (g_stat(full, &sb) != 0 || !S_ISREG(sb.st_mode)) {
+            g_free(full);
+            continue;
+        }
+        if (now - sb.st_mtime < cfg.min_age) {
+            /* likely still being written */
+            g_free(full);
+            continue;
+        }
+
+        const gchar *rel = full + strlen(cfg.source_dir);
+        while (*rel == '/')
+            rel++;
+
+        gchar *size_str = g_strdup_printf("%" G_GINT64_FORMAT,
+                                          (gint64)sb.st_size);
+        const gchar *prev = g_hash_table_lookup(uploaded, rel);
+        if (prev != NULL && strcmp(prev, size_str) == 0) {
+            st->skipped++;
+            g_free(size_str);
+            g_free(full);
+            continue;
+        }
+
+        gchar *key_plain = g_strconcat(cfg.prefix, rel, NULL);
+        gchar *key_enc = urlencode_key(key_plain);
+        long code = 0;
+        char errbuf[512];
+        int rc = s3_put_file(s3, key_enc, full, (gint64)sb.st_size, &code,
+                             errbuf, sizeof(errbuf));
+        if (rc == 0) {
+            syslog(LOG_INFO, "uploaded %s (%s bytes)", rel, size_str);
+            g_hash_table_replace(uploaded, g_strdup(rel), g_strdup(size_str));
+            append_state(rel, size_str);
+            st->uploaded++;
+            st->consecutive_failures = 0;
+        } else {
+            syslog(LOG_WARNING, "upload failed for %s (HTTP %ld): %s", rel,
+                   code, errbuf);
+            st->failed++;
+            st->consecutive_failures++;
+        }
+        g_free(key_plain);
+        g_free(key_enc);
+        g_free(size_str);
+        g_free(full);
+    }
+    g_dir_close(d);
+}
+
+static gpointer sync_thread(gpointer data)
+{
+    (void)data;
+    S3Cfg s3 = {
+        .endpoint = cfg.endpoint,
+        .bucket = cfg.bucket,
+        .region = cfg.region,
+        .access_key = cfg.access_key,
+        .secret_key = cfg.secret_key,
+        .path_style = cfg.path_style,
+        .insecure = cfg.insecure,
+    };
+    struct pass_stats st = { 0, 0, 0, 0 };
+    time_t start = time(NULL);
+    scan_dir(cfg.source_dir, start, &s3, &st);
+    if (st.uploaded > 0 || st.failed > 0)
+        syslog(LOG_INFO,
+               "sync pass done in %lds: %u uploaded, %u already synced, "
+               "%u failed",
+               (long)(time(NULL) - start), st.uploaded, st.skipped, st.failed);
+    g_atomic_int_set(&sync_running, 0);
+    return NULL;
+}
+
+static void trigger_sync(const char *why)
+{
+    if (!g_atomic_int_compare_and_exchange(&sync_running, 0, 1)) {
+        syslog(LOG_DEBUG, "sync already running, skipping trigger (%s)", why);
+        return;
+    }
+    GThread *t = g_thread_new("sync", sync_thread, NULL);
+    g_thread_unref(t);
+}
+
+/* ------------------------------------------------------------------ */
+/* Event subscription                                                  */
+/* ------------------------------------------------------------------ */
+
+static void on_pulse(guint subscription, AXEvent *event, gpointer user_data)
+{
+    (void)subscription;
+    (void)user_data;
+    trigger_sync("pulse");
+    ax_event_free(event);
+}
+
+static gboolean subscribe_pulse(AXEventHandler *handler)
+{
+    GError *err = NULL;
+    AXEventKeyValueSet *kvs = ax_event_key_value_set_new();
+
+    ax_event_key_value_set_add_key_value(kvs, "topic0", "tns1", "UserAlarm",
+                                         AX_VALUE_TYPE_STRING, NULL);
+    ax_event_key_value_set_add_key_value(kvs, "topic1", "tnsaxis", "Recurring",
+                                         AX_VALUE_TYPE_STRING, NULL);
+    ax_event_key_value_set_add_key_value(kvs, "topic2", "tnsaxis", "Pulse",
+                                         AX_VALUE_TYPE_STRING, NULL);
+    if (cfg.schedule_id != NULL && cfg.schedule_id[0] != '\0')
+        ax_event_key_value_set_add_key_value(kvs, "id", NULL, cfg.schedule_id,
+                                             AX_VALUE_TYPE_STRING, NULL);
+
+    guint subscription = 0;
+    gboolean ok = ax_event_handler_subscribe(handler, kvs, &subscription,
+                                             on_pulse, NULL, &err);
+    ax_event_key_value_set_free(kvs);
+    if (!ok) {
+        syslog(LOG_ERR, "event subscription failed: %s",
+               err ? err->message : "unknown");
+        g_clear_error(&err);
+        return FALSE;
+    }
+    syslog(LOG_INFO, "subscribed to Recurring/Pulse events (schedule '%s')",
+           cfg.schedule_id[0] ? cfg.schedule_id : "<any>");
+    return TRUE;
+}
+
+/* ------------------------------------------------------------------ */
+
+static gboolean initial_sync(gpointer data)
+{
+    (void)data;
+    trigger_sync("startup");
+    return G_SOURCE_REMOVE;
+}
+
+static gboolean on_quit_signal(gpointer data)
+{
+    (void)data;
+    g_main_loop_quit(loop);
+    return G_SOURCE_REMOVE;
+}
+
+int main(void)
+{
+    openlog(APP_NAME, LOG_PID, LOG_USER);
+    syslog(LOG_INFO, "starting");
+
+    state_path =
+        g_strdup_printf("/usr/local/packages/%s/localdata/uploaded.txt",
+                        APP_NAME);
+
+    gboolean configured = load_config();
+    load_state();
+    curl_global_init(CURL_GLOBAL_ALL);
+
+    loop = g_main_loop_new(NULL, FALSE);
+    g_unix_signal_add(SIGTERM, on_quit_signal, NULL);
+    g_unix_signal_add(SIGINT, on_quit_signal, NULL);
+
+    AXEventHandler *handler = NULL;
+    if (configured) {
+        handler = ax_event_handler_new();
+        if (!subscribe_pulse(handler))
+            return EXIT_FAILURE;
+        /* one pass shortly after start so testing does not wait for a pulse */
+        g_timeout_add_seconds(15, initial_sync, NULL);
+    } else {
+        /* stay alive so the parameter page works; user restarts app after
+         * configuring */
+        syslog(LOG_INFO, "idle: waiting for configuration");
+    }
+
+    g_main_loop_run(loop);
+
+    syslog(LOG_INFO, "stopping");
+    if (handler != NULL)
+        ax_event_handler_free(handler);
+    g_main_loop_unref(loop);
+    curl_global_cleanup();
+    return EXIT_SUCCESS;
+}
