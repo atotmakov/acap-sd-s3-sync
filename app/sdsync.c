@@ -1,13 +1,13 @@
 /*
  * sds3sync — push finished SD-card recordings to S3-compatible storage.
  *
- * Trigger model: subscribes to the camera's recurring Pulse events
- * (tns1:UserAlarm/tnsaxis:Recurring/Pulse, optionally filtered to one
- * schedule id). Each pulse starts one sync pass: walk SourceDir, upload
- * every finished file (mtime older than MinAgeSeconds, extension in
- * Extensions) that is not yet in the local upload state, then record it so
- * it is uploaded exactly once. Files are never deleted from the SD card —
- * the camera's own FIFO cleanup reclaims space.
+ * Trigger model: an in-app monotonic timer (IntervalSeconds, default 60)
+ * starts one sync pass per tick: walk SourceDir, upload every finished file
+ * (mtime older than MinAgeSeconds, extension in Extensions) that is not yet
+ * in the local upload state, then record it so it is uploaded exactly once.
+ * A tick that fires while a pass is still running is skipped. Files are
+ * never deleted from the SD card — the camera's own FIFO cleanup reclaims
+ * space.
  */
 #include <glib-unix.h>
 #include <glib.h>
@@ -18,7 +18,6 @@
 #include <syslog.h>
 #include <time.h>
 
-#include <axsdk/axevent.h>
 #include <axsdk/axparameter.h>
 #include <curl/curl.h>
 
@@ -34,9 +33,9 @@ typedef struct {
     gchar *secret_key;
     gchar *prefix;
     gchar *source_dir;
-    gchar *schedule_id;
     gchar **extensions;   /* NULL-terminated, each like ".mkv" */
     gint min_age;
+    gint interval;
     gboolean path_style;
     gboolean insecure;
 } Config;
@@ -89,7 +88,6 @@ static gboolean load_config(void)
     cfg.secret_key = get_param(p, "SecretKey", "");
     cfg.prefix = get_param(p, "Prefix", "");
     cfg.source_dir = get_param(p, "SourceDir", "/var/spool/storage/SD_DISK");
-    cfg.schedule_id = get_param(p, "ScheduleId", "");
 
     gchar *ext = get_param(p, "Extensions", ".mkv");
     cfg.extensions = g_strsplit(ext, ",", -1);
@@ -102,6 +100,12 @@ static gboolean load_config(void)
     if (cfg.min_age < 0)
         cfg.min_age = 0;
     g_free(age);
+
+    gchar *iv = get_param(p, "IntervalSeconds", "60");
+    cfg.interval = atoi(iv);
+    if (cfg.interval < 10)
+        cfg.interval = 10; /* protect against hammering the SD card */
+    g_free(iv);
 
     gchar *ps = get_param(p, "PathStyle", "yes");
     cfg.path_style = param_yes(ps);
@@ -318,54 +322,19 @@ static void trigger_sync(const char *why)
 }
 
 /* ------------------------------------------------------------------ */
-/* Event subscription                                                  */
-/* ------------------------------------------------------------------ */
-
-static void on_pulse(guint subscription, AXEvent *event, gpointer user_data)
-{
-    (void)subscription;
-    (void)user_data;
-    trigger_sync("pulse");
-    ax_event_free(event);
-}
-
-static gboolean subscribe_pulse(AXEventHandler *handler)
-{
-    GError *err = NULL;
-    AXEventKeyValueSet *kvs = ax_event_key_value_set_new();
-
-    ax_event_key_value_set_add_key_value(kvs, "topic0", "tns1", "UserAlarm",
-                                         AX_VALUE_TYPE_STRING, NULL);
-    ax_event_key_value_set_add_key_value(kvs, "topic1", "tnsaxis", "Recurring",
-                                         AX_VALUE_TYPE_STRING, NULL);
-    ax_event_key_value_set_add_key_value(kvs, "topic2", "tnsaxis", "Pulse",
-                                         AX_VALUE_TYPE_STRING, NULL);
-    if (cfg.schedule_id != NULL && cfg.schedule_id[0] != '\0')
-        ax_event_key_value_set_add_key_value(kvs, "id", NULL, cfg.schedule_id,
-                                             AX_VALUE_TYPE_STRING, NULL);
-
-    guint subscription = 0;
-    gboolean ok = ax_event_handler_subscribe(handler, kvs, &subscription,
-                                             on_pulse, NULL, &err);
-    ax_event_key_value_set_free(kvs);
-    if (!ok) {
-        syslog(LOG_ERR, "event subscription failed: %s",
-               err ? err->message : "unknown");
-        g_clear_error(&err);
-        return FALSE;
-    }
-    syslog(LOG_INFO, "subscribed to Recurring/Pulse events (schedule '%s')",
-           cfg.schedule_id[0] ? cfg.schedule_id : "<any>");
-    return TRUE;
-}
-
-/* ------------------------------------------------------------------ */
 
 static gboolean initial_sync(gpointer data)
 {
     (void)data;
     trigger_sync("startup");
     return G_SOURCE_REMOVE;
+}
+
+static gboolean on_timer(gpointer data)
+{
+    (void)data;
+    trigger_sync("timer");
+    return G_SOURCE_CONTINUE;
 }
 
 static gboolean on_quit_signal(gpointer data)
@@ -392,13 +361,11 @@ int main(void)
     g_unix_signal_add(SIGTERM, on_quit_signal, NULL);
     g_unix_signal_add(SIGINT, on_quit_signal, NULL);
 
-    AXEventHandler *handler = NULL;
     if (configured) {
-        handler = ax_event_handler_new();
-        if (!subscribe_pulse(handler))
-            return EXIT_FAILURE;
-        /* one pass shortly after start so testing does not wait for a pulse */
+        /* one pass shortly after start, then steady cadence */
         g_timeout_add_seconds(15, initial_sync, NULL);
+        g_timeout_add_seconds((guint)cfg.interval, on_timer, NULL);
+        syslog(LOG_INFO, "timer armed: sync pass every %d s", cfg.interval);
     } else {
         /* stay alive so the parameter page works; user restarts app after
          * configuring */
@@ -408,8 +375,6 @@ int main(void)
     g_main_loop_run(loop);
 
     syslog(LOG_INFO, "stopping");
-    if (handler != NULL)
-        ax_event_handler_free(handler);
     g_main_loop_unref(loop);
     curl_global_cleanup();
     return EXIT_SUCCESS;

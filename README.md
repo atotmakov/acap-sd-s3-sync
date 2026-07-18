@@ -6,12 +6,10 @@ to an S3-compatible object store (MinIO, Backblaze B2, or any SigV4 endpoint).
 
 ## Design
 
-- **Trigger**: subscribes to the camera's own recurring Pulse events
-  (`tns1:UserAlarm/tnsaxis:Recurring/Pulse`). Create a pulse in the camera UI
-  (System → Events → Schedules → add Pulse) or via the Event1 SOAP service;
-  each pulse fires one sync pass. On the target camera two pulses already
-  exist: `com.axis.schedules.genid.id-1` ("oneminpulse", every minute — the
-  default) and `com.axis.schedules.genid.id-0` ("each_minute").
+- **Trigger**: an in-app monotonic timer (`IntervalSeconds`, default 60 s)
+  fires one sync pass per tick; the first pass runs 15 s after app start. No
+  camera-side schedule/pulse configuration is needed. Ticks that arrive while
+  a pass is still running are skipped.
 - **Sync pass**: recursively scans `SourceDir` (default
   `/var/spool/storage/SD_DISK`), uploads every file matching `Extensions`
   whose mtime is at least `MinAgeSeconds` old (default 120 s — skips chunks
@@ -36,7 +34,7 @@ to an S3-compatible object store (MinIO, Backblaze B2, or any SigV4 endpoint).
 | `AccessKey` / `SecretKey` | *(empty — required)* | Credentials. Stored as plain ACAP params — create a scoped, write-only key |
 | `Prefix` | `axis-b8a44f6c2746/` | Object key prefix |
 | `SourceDir` | `/var/spool/storage/SD_DISK` | Directory tree to sync |
-| `ScheduleId` | `com.axis.schedules.genid.id-1` | Pulse schedule to react to; empty = any pulse |
+| `IntervalSeconds` | `60` | Sync pass cadence (clamped to ≥ 10) |
 | `Extensions` | `.mkv` | Comma-separated suffix list |
 | `MinAgeSeconds` | `120` | Skip files modified more recently than this |
 | `PathStyle` | `yes` | `yes` = `endpoint/bucket/key` (MinIO); `no` = virtual-host style |
