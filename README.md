@@ -32,7 +32,7 @@ to an S3-compatible object store (MinIO, Backblaze B2, or any SigV4 endpoint).
 | `Bucket` | `cctv` | Target bucket (must exist) |
 | `Region` | `us-east-1` | SigV4 region string (MinIO accepts the default) |
 | `AccessKey` / `SecretKey` | *(empty — required)* | Credentials. Stored as plain ACAP params — create a scoped, write-only key |
-| `Prefix` | `axis-b8a44f6c2746/` | Object key prefix |
+| `Prefix` | *(empty — auto-derived)* | Object key prefix. If empty on first run, derived from `/etc/hostname` (falls back to `axis-<eth0 MAC>` if unreadable) and **persisted back** to this parameter — check the app's Settings page after first start to see what it picked, or set it explicitly to override. |
 | `SourceDir` | `/var/spool/storage/SD_DISK` | Directory tree to sync |
 | `IntervalSeconds` | `60` | Sync pass cadence (clamped to ≥ 10) |
 | `Extensions` | `.mkv` | Comma-separated suffix list |

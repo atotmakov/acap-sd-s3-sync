@@ -70,6 +70,65 @@ static gboolean param_yes(const gchar *v)
                  g_ascii_strcasecmp(v, "true") == 0 || strcmp(v, "1") == 0);
 }
 
+/* Best-effort unique identifier for this camera, used only as a fallback
+ * when /etc/hostname cannot be read. Axis's own default hostname is
+ * "axis-<mac without colons>", so this reproduces that convention from the
+ * primary interface's MAC address. */
+static gchar *mac_based_id(void)
+{
+    gchar *addr = NULL;
+    if (!g_file_get_contents("/sys/class/net/eth0/address", &addr, NULL, NULL))
+        return NULL;
+    g_strstrip(addr);
+    GString *s = g_string_new("axis-");
+    for (const gchar *p = addr; *p; p++)
+        if (*p != ':')
+            g_string_append_c(s, g_ascii_tolower(*p));
+    g_free(addr);
+    return g_string_free(s, FALSE);
+}
+
+static gchar *derive_hostname_prefix(void)
+{
+    gchar *host = NULL;
+    if (g_file_get_contents("/etc/hostname", &host, NULL, NULL)) {
+        g_strstrip(host);
+        if (host[0] != '\0')
+            return g_strdup_printf("%s/", host);
+        g_free(host);
+    }
+
+    gchar *mac_id = mac_based_id();
+    if (mac_id != NULL)
+        return g_strdup_printf("%s/", mac_id);
+
+    syslog(LOG_WARNING,
+           "could not read /etc/hostname or eth0 MAC — falling back to "
+           "'unknown-camera/'; set Prefix manually to avoid colliding with "
+           "other cameras in the bucket");
+    return g_strdup("unknown-camera/");
+}
+
+/* If Prefix is unset, derive it from the camera's identity and persist it
+ * so the UI reflects the real value on subsequent views/restarts. */
+static void ensure_prefix(AXParameter *p)
+{
+    if (cfg.prefix[0] != '\0')
+        return;
+
+    gchar *derived = derive_hostname_prefix();
+    GError *err = NULL;
+    if (!ax_parameter_set(p, "Prefix", derived, TRUE, &err)) {
+        syslog(LOG_WARNING, "could not persist auto-derived Prefix '%s': %s",
+               derived, err ? err->message : "unknown");
+        g_clear_error(&err);
+    } else {
+        syslog(LOG_INFO, "auto-derived Prefix on first run: '%s'", derived);
+    }
+    g_free(cfg.prefix);
+    cfg.prefix = derived;
+}
+
 static gboolean load_config(void)
 {
     GError *err = NULL;
@@ -88,6 +147,7 @@ static gboolean load_config(void)
     cfg.secret_key = get_param(p, "SecretKey", "");
     cfg.prefix = get_param(p, "Prefix", "");
     cfg.source_dir = get_param(p, "SourceDir", "/var/spool/storage/SD_DISK");
+    ensure_prefix(p);
 
     gchar *ext = get_param(p, "Extensions", ".mkv");
     cfg.extensions = g_strsplit(ext, ",", -1);
