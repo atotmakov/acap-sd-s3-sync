@@ -14,7 +14,7 @@
             "vendor": "atotmakov",
             "embeddedSdkVersion": "3.0",
             "runMode": "respawn",
-            "version": "0.3.0"
+            "version": "0.4.0"
         },
         "configuration": {
             "paramConfig": [

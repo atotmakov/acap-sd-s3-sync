@@ -19,10 +19,24 @@ to an S3-compatible object store (MinIO, Backblaze B2, or any SigV4 endpoint).
   `size<TAB>relative-path` line per uploaded file. Delete the file and restart
   the app to re-upload everything. If a file's size changes after upload
   (should not happen for finalized chunks) it is re-uploaded and overwritten.
+  Survives app upgrade/reinstall (`localdata` isn't purged by a plain
+  `remove`); only a factory-reset-style wipe clears it.
+- **Reconciliation**: state (both the in-memory table and `uploaded.txt`)
+  would otherwise grow forever, since finished files are never deleted from
+  the SD card and nothing else prunes stale entries. To keep it bounded by
+  "what currently fits on the SD card" instead of "everything ever
+  uploaded," a reconcile pass runs (a) once at startup, right after loading
+  state, and (b) every 1024 successful uploads: it drops any tracked entry
+  whose file no longer exists under `SourceDir` (already cycled out by the
+  camera's own FIFO cleanup), then atomically rewrites `uploaded.txt` from
+  what's left (temp file + rename — a crash mid-rewrite leaves the previous
+  state file intact). If `SourceDir` itself isn't accessible when a
+  reconcile runs (e.g. SD card not yet mounted), the whole pass is skipped
+  rather than risk wiping entries for files that are actually still there.
 - **Uploads**: HTTPS PUT with AWS Signature V4, `UNSIGNED-PAYLOAD`, streamed
   via libcurl (no file buffering in RAM). A pass aborts after 3 consecutive
-  failures and retries on the next pulse. One pass runs at a time; overlapping
-  pulses are skipped.
+  failures and retries on the next timer tick. One pass runs at a time;
+  overlapping ticks are skipped.
 
 ## Parameters (Apps → SD to S3 Sync → Settings)
 

@@ -231,9 +231,86 @@ static void append_state(const gchar *rel, const gchar *size_str)
     fclose(fp);
 }
 
+/* Rewrite state_path from the current (already-pruned) hash table.
+ * Atomic: write to a temp file, fflush, then rename over the original —
+ * a crash mid-write leaves the previous state file untouched. */
+static void rewrite_state_file(void)
+{
+    gchar *tmp_path = g_strdup_printf("%s.tmp", state_path);
+    FILE *fp = fopen(tmp_path, "w");
+    if (fp == NULL) {
+        syslog(LOG_ERR, "reconcile: cannot open %s for rewrite", tmp_path);
+        g_free(tmp_path);
+        return;
+    }
+
+    GHashTableIter iter;
+    gpointer key, value;
+    gboolean write_error = FALSE;
+    g_hash_table_iter_init(&iter, uploaded);
+    while (g_hash_table_iter_next(&iter, &key, &value)) {
+        if (fprintf(fp, "%s\t%s\n", (const gchar *)value, (const gchar *)key) < 0)
+            write_error = TRUE;
+    }
+
+    if (write_error || fflush(fp) != 0) {
+        syslog(LOG_ERR, "reconcile: write error rewriting %s, keeping old state file",
+               tmp_path);
+        fclose(fp);
+        g_unlink(tmp_path);
+        g_free(tmp_path);
+        return;
+    }
+    fclose(fp);
+
+    if (g_rename(tmp_path, state_path) != 0)
+        syslog(LOG_ERR, "reconcile: rename %s -> %s failed", tmp_path, state_path);
+    g_free(tmp_path);
+}
+
+/* Drop entries whose file no longer exists under SourceDir (already cycled
+ * out by the camera's own FIFO cleanup), then compact the state file to
+ * match. This is what keeps both the hash table and uploaded.txt bounded
+ * by "what currently fits on the SD card" instead of growing forever.
+ *
+ * Guarded against a misconfigured/unmounted SourceDir: if the directory
+ * itself isn't there, every entry would look "missing" and we'd wipe state
+ * for files that are actually still on disk, so we bail out instead. */
+static void reconcile_state(const char *why)
+{
+    if (!g_file_test(cfg.source_dir, G_FILE_TEST_IS_DIR)) {
+        syslog(LOG_WARNING,
+               "reconcile (%s) skipped: SourceDir '%s' is not accessible "
+               "right now", why, cfg.source_dir);
+        return;
+    }
+
+    guint before = g_hash_table_size(uploaded);
+    GHashTableIter iter;
+    gpointer key, value;
+    g_hash_table_iter_init(&iter, uploaded);
+    while (g_hash_table_iter_next(&iter, &key, &value)) {
+        gchar *full = g_build_filename(cfg.source_dir, (const gchar *)key, NULL);
+        gboolean exists = g_file_test(full, G_FILE_TEST_EXISTS);
+        g_free(full);
+        if (!exists)
+            g_hash_table_iter_remove(&iter); /* safe: removes via the iterator */
+    }
+    guint removed = before - g_hash_table_size(uploaded);
+
+    syslog(LOG_INFO, "reconcile (%s): removed %u stale entries, %u remain",
+           why, removed, g_hash_table_size(uploaded));
+
+    if (removed > 0)
+        rewrite_state_file();
+}
+
 /* ------------------------------------------------------------------ */
 /* Sync pass                                                           */
 /* ------------------------------------------------------------------ */
+
+#define RECONCILE_EVERY_UPLOADS 1024
+static guint uploads_since_reconcile = 0;
 
 static gchar *urlencode_key(const char *key)
 {
@@ -333,6 +410,10 @@ static void scan_dir(const gchar *dir, time_t now, const S3Cfg *s3,
             append_state(rel, size_str);
             st->uploaded++;
             st->consecutive_failures = 0;
+            if (++uploads_since_reconcile >= RECONCILE_EVERY_UPLOADS) {
+                reconcile_state("upload count");
+                uploads_since_reconcile = 0;
+            }
         } else {
             syslog(LOG_WARNING, "upload failed for %s (HTTP %ld): %s", rel,
                    code, errbuf);
@@ -415,6 +496,7 @@ int main(void)
 
     gboolean configured = load_config();
     load_state();
+    reconcile_state("startup"); /* prune cruft accumulated across restarts */
     curl_global_init(CURL_GLOBAL_ALL);
 
     loop = g_main_loop_new(NULL, FALSE);
