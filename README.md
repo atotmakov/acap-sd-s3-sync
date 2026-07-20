@@ -16,23 +16,30 @@ to an S3-compatible object store (MinIO, Backblaze B2, or any SigV4 endpoint).
   still being written) and that is not already recorded in the local state
   file. Upload once, keep on SD; the camera's own FIFO cleanup reclaims space.
 - **State**: `/usr/local/packages/sds3sync/localdata/uploaded.txt`, one
-  `size<TAB>relative-path` line per uploaded file. Delete the file and restart
-  the app to re-upload everything. If a file's size changes after upload
-  (should not happen for finalized chunks) it is re-uploaded and overwritten.
-  Survives app upgrade/reinstall (`localdata` isn't purged by a plain
-  `remove`); only a factory-reset-style wipe clears it.
-- **Reconciliation**: state (both the in-memory table and `uploaded.txt`)
-  would otherwise grow forever, since finished files are never deleted from
-  the SD card and nothing else prunes stale entries. To keep it bounded by
-  "what currently fits on the SD card" instead of "everything ever
-  uploaded," a reconcile pass runs (a) once at startup, right after loading
-  state, and (b) every 1024 successful uploads: it drops any tracked entry
-  whose file no longer exists under `SourceDir` (already cycled out by the
-  camera's own FIFO cleanup), then atomically rewrites `uploaded.txt` from
-  what's left (temp file + rename — a crash mid-rewrite leaves the previous
-  state file intact). If `SourceDir` itself isn't accessible when a
-  reconcile runs (e.g. SD card not yet mounted), the whole pass is skipped
-  rather than risk wiping entries for files that are actually still there.
+  `size<TAB>relative-path` line per uploaded file, mirrored into an in-memory
+  hash table (relative path → size) loaded at startup. Delete the file and
+  restart the app to re-upload everything. If a file's size changes after
+  upload (should not happen for finalized chunks) it is re-uploaded and
+  overwritten. Survives app upgrade/reinstall (`localdata` isn't purged by a
+  plain `remove`); only a factory-reset-style wipe clears it.
+
+  Neither structure is aware of what's still physically on the SD card, so
+  without pruning both would grow forever — finished files are never deleted
+  from SD (the camera's own FIFO cleanup reclaims space), and every unique
+  path ever uploaded stays tracked regardless of whether its file was later
+  cycled out. A **reconcile pass** keeps both bounded by "what currently fits
+  on the SD card" instead of "everything ever uploaded since deployment": it
+  drops any tracked entry whose file no longer exists under `SourceDir`, then
+  atomically rewrites `uploaded.txt` from what's left (temp file + rename —
+  a crash mid-rewrite leaves the previous state file intact). Reconcile runs
+  (a) once at startup, right after loading state — catches cruft accumulated
+  across restarts — and (b) every 1024 successful uploads during normal
+  operation. If `SourceDir` itself isn't accessible when a reconcile would
+  run (e.g. SD card not yet mounted), the whole pass is skipped rather than
+  risk wiping entries for files that are only temporarily invisible.
+  Verified against a real deletion (removed a recording via VAPIX
+  `record/remove.cgi`, restarted the app, confirmed the log reported
+  exactly one stale entry pruned and the state file rewritten).
 - **Uploads**: HTTPS PUT with AWS Signature V4, `UNSIGNED-PAYLOAD`, streamed
   via libcurl (no file buffering in RAM). A pass aborts after 3 consecutive
   failures and retries on the next timer tick. One pass runs at a time;
