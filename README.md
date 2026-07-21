@@ -48,17 +48,21 @@ to an S3-compatible object store (MinIO, Backblaze B2, or any SigV4 endpoint).
 
 ## Parameters (Apps → SD to S3 Sync → Settings)
 
+Two groups: **connection** settings (how to reach and address the S3-compatible
+endpoint — prefixed `S3*`) and **operation** settings (how the sync itself
+behaves on this camera).
+
 | Param | Default | Meaning |
 |---|---|---|
-| `Endpoint` | *(empty — required)* | e.g. `https://minio.example.com:9000` |
-| `Bucket` | `cctv` | Target bucket (must exist) |
-| `Region` | `us-east-1` | SigV4 region string (MinIO accepts the default) |
-| `AccessKey` / `SecretKey` | *(empty — required)* | Credentials. Stored as plain ACAP params — create a scoped, write-only key |
+| `S3Endpoint` | *(empty — required)* | e.g. `https://minio.example.com:9000` |
+| `S3Bucket` | `cctv` | Target bucket (must exist) |
+| `S3Region` | `us-east-1` | SigV4 region string (MinIO accepts the default) |
+| `S3AccessKey` / `S3SecretKey` | *(empty — required)* | Credentials. Stored as plain ACAP params — create a scoped, write-only key |
+| `S3PathStyle` | `yes` | `yes` = `endpoint/bucket/key` (MinIO); `no` = virtual-host style |
+| `S3InsecureTLS` | `no` | `yes` = skip TLS cert verification (self-signed MinIO) |
 | `Prefix` | *(empty — auto-derived)* | Object key prefix. If empty on first run, derived from `/etc/hostname` (falls back to `axis-<eth0 MAC>` if unreadable) and **persisted back** to this parameter — check the app's Settings page after first start to see what it picked, or set it explicitly to override. |
 | `SourceDir` | `/var/spool/storage/SD_DISK` | Directory tree to sync |
 | `IntervalSeconds` | `60` | Sync pass cadence (clamped to ≥ 10) |
-| `PathStyle` | `yes` | `yes` = `endpoint/bucket/key` (MinIO); `no` = virtual-host style |
-| `InsecureTLS` | `no` | `yes` = skip TLS cert verification (self-signed MinIO) |
 
 Two things are hardcoded in `sdsync.c` rather than exposed as parameters,
 both for the same reason — they're not operational choices, and a
@@ -72,7 +76,7 @@ new recordings"), so they're not worth exposing as something to get wrong:
   pipeline's own chunking/flush behavior, not something that should vary by
   deployment.
 
-The app starts idle if `Endpoint`/`AccessKey`/`SecretKey` are unset —
+The app starts idle if `S3Endpoint`/`S3AccessKey`/`S3SecretKey` are unset —
 configure them, then restart the app.
 
 ## Build
@@ -106,7 +110,7 @@ App logs go to the camera syslog:
 curl -s --digest -u root:<pw> "http://<camera-ip>/axis-cgi/admin/systemlog.cgi" | grep sds3sync
 ```
 
-- `idle: waiting for configuration` — set Endpoint/AccessKey/SecretKey, restart app.
+- `idle: waiting for configuration` — set S3Endpoint/S3AccessKey/S3SecretKey, restart app.
 - Uploads failing with HTTP 403 — check clock (SigV4 is time-sensitive; NTP
   must work), credentials, and bucket policy.
 - No SD access (`g_dir_open` failures / zero files found) — the manifest

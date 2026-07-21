@@ -14,20 +14,20 @@
             "vendor": "atotmakov",
             "embeddedSdkVersion": "3.0",
             "runMode": "respawn",
-            "version": "0.6.0"
+            "version": "0.7.0"
         },
         "configuration": {
             "paramConfig": [
-                { "name": "Endpoint",      "default": "",                               "type": "string" },
-                { "name": "Bucket",        "default": "cctv",                           "type": "string" },
-                { "name": "Region",        "default": "us-east-1",                      "type": "string" },
-                { "name": "AccessKey",     "default": "",                               "type": "string" },
-                { "name": "SecretKey",     "default": "",                               "type": "string" },
+                { "name": "S3Endpoint",    "default": "",                               "type": "string" },
+                { "name": "S3Bucket",      "default": "cctv",                           "type": "string" },
+                { "name": "S3Region",      "default": "us-east-1",                      "type": "string" },
+                { "name": "S3AccessKey",   "default": "",                               "type": "string" },
+                { "name": "S3SecretKey",   "default": "",                               "type": "string" },
+                { "name": "S3PathStyle",   "default": "yes",                            "type": "string" },
+                { "name": "S3InsecureTLS", "default": "no",                             "type": "string" },
                 { "name": "Prefix",        "default": "",                               "type": "string" },
                 { "name": "SourceDir",     "default": "/var/spool/storage/SD_DISK",     "type": "string" },
-                { "name": "IntervalSeconds", "default": "60",                           "type": "string" },
-                { "name": "PathStyle",     "default": "yes",                            "type": "string" },
-                { "name": "InsecureTLS",   "default": "no",                             "type": "string" }
+                { "name": "IntervalSeconds", "default": "60",                           "type": "string" }
             ]
         }
     }

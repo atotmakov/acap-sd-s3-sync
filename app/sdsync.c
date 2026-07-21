@@ -138,11 +138,11 @@ static gboolean load_config(void)
         return FALSE;
     }
 
-    cfg.endpoint = get_param(p, "Endpoint", "");
-    cfg.bucket = get_param(p, "Bucket", "cctv");
-    cfg.region = get_param(p, "Region", "us-east-1");
-    cfg.access_key = get_param(p, "AccessKey", "");
-    cfg.secret_key = get_param(p, "SecretKey", "");
+    cfg.endpoint = get_param(p, "S3Endpoint", "");
+    cfg.bucket = get_param(p, "S3Bucket", "cctv");
+    cfg.region = get_param(p, "S3Region", "us-east-1");
+    cfg.access_key = get_param(p, "S3AccessKey", "");
+    cfg.secret_key = get_param(p, "S3SecretKey", "");
     cfg.prefix = get_param(p, "Prefix", "");
     cfg.source_dir = get_param(p, "SourceDir", "/var/spool/storage/SD_DISK");
     ensure_prefix(p);
@@ -153,11 +153,11 @@ static gboolean load_config(void)
         cfg.interval = 10; /* protect against hammering the SD card */
     g_free(iv);
 
-    gchar *ps = get_param(p, "PathStyle", "yes");
+    gchar *ps = get_param(p, "S3PathStyle", "yes");
     cfg.path_style = param_yes(ps);
     g_free(ps);
 
-    gchar *ins = get_param(p, "InsecureTLS", "no");
+    gchar *ins = get_param(p, "S3InsecureTLS", "no");
     cfg.insecure = param_yes(ins);
     g_free(ins);
 
@@ -174,7 +174,7 @@ static gboolean load_config(void)
     if (cfg.endpoint[0] == '\0' || cfg.access_key[0] == '\0' ||
         cfg.secret_key[0] == '\0') {
         syslog(LOG_WARNING,
-               "Endpoint/AccessKey/SecretKey not configured yet — "
+               "S3Endpoint/S3AccessKey/S3SecretKey not configured yet — "
                "set app parameters, then restart the app");
         return FALSE;
     }
