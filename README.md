@@ -128,3 +128,14 @@ curl -s --digest -u root:<pw> "http://<camera-ip>/axis-cgi/admin/systemlog.cgi" 
   `UNSIGNED-PAYLOAD` — fine for MinIO/B2 over TLS; AWS S3 proper also accepts
   it, but signed-payload support would need to be added for policies that
   require `x-amz-content-sha256` to be a real digest.
+
+## TODO
+
+- **Migrate `manifest.json` to schema v2.x** (currently `1.7.1`). Prerequisite
+  for using Axis's ACAP Signing Service (https://developer.axis.com/acap/how-to-guides/service-portal/acap-application-signing/)
+  — the non-TIP signing path only accepts v2.x manifests. No API for signing
+  exists either way (confirmed: manual browser upload/download only), so this
+  unblocks a manual signing step, not automation. Currently unsigned
+  (`SignatureStatus="Unknown"`) but installs and runs fine on this camera's
+  AXIS OS 12.11.72 despite Axis's docs stating 12.0+ only allows signed apps
+  by default — worth re-checking if that changes on a future firmware update.
