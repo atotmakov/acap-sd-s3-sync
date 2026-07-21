@@ -2,7 +2,7 @@
  * sds3sync — push finished SD-card recordings to S3-compatible storage.
  *
  * Trigger model: an in-app monotonic timer (IntervalSeconds, default 60)
- * starts one sync pass per tick: walk SourceDir, upload every finished
+ * starts one sync pass per tick: walk RecordingPath, upload every finished
  * .mkv file (mtime older than MIN_AGE_SECONDS) that is not yet in the local
  * upload state, then record it so it is uploaded exactly once.
  * A tick that fires while a pass is still running is skipped. Files are
@@ -32,7 +32,7 @@ typedef struct {
     gchar *access_key;
     gchar *secret_key;
     gchar *prefix;
-    gchar *source_dir;
+    gchar *recording_path;
     gint interval;
     gboolean path_style;
     gboolean insecure;
@@ -144,7 +144,7 @@ static gboolean load_config(void)
     cfg.access_key = get_param(p, "S3AccessKey", "");
     cfg.secret_key = get_param(p, "S3SecretKey", "");
     cfg.prefix = get_param(p, "Prefix", "");
-    cfg.source_dir = get_param(p, "SourceDir", "/var/spool/storage/SD_DISK");
+    cfg.recording_path = get_param(p, "RecordingPath", "/var/spool/storage/SD_DISK");
     ensure_prefix(p);
 
     gchar *iv = get_param(p, "IntervalSeconds", "60");
@@ -165,9 +165,9 @@ static gboolean load_config(void)
     size_t n = strlen(cfg.endpoint);
     while (n > 0 && cfg.endpoint[n - 1] == '/')
         cfg.endpoint[--n] = '\0';
-    n = strlen(cfg.source_dir);
-    while (n > 1 && cfg.source_dir[n - 1] == '/')
-        cfg.source_dir[--n] = '\0';
+    n = strlen(cfg.recording_path);
+    while (n > 1 && cfg.recording_path[n - 1] == '/')
+        cfg.recording_path[--n] = '\0';
 
     ax_parameter_free(p);
 
@@ -254,20 +254,20 @@ static void rewrite_state_file(void)
     g_free(tmp_path);
 }
 
-/* Drop entries whose file no longer exists under SourceDir (already cycled
+/* Drop entries whose file no longer exists under RecordingPath (already cycled
  * out by the camera's own FIFO cleanup), then compact the state file to
  * match. This is what keeps both the hash table and uploaded.txt bounded
  * by "what currently fits on the SD card" instead of growing forever.
  *
- * Guarded against a misconfigured/unmounted SourceDir: if the directory
+ * Guarded against a misconfigured/unmounted RecordingPath: if the directory
  * itself isn't there, every entry would look "missing" and we'd wipe state
  * for files that are actually still on disk, so we bail out instead. */
 static void reconcile_state(const char *why)
 {
-    if (!g_file_test(cfg.source_dir, G_FILE_TEST_IS_DIR)) {
+    if (!g_file_test(cfg.recording_path, G_FILE_TEST_IS_DIR)) {
         syslog(LOG_WARNING,
-               "reconcile (%s) skipped: SourceDir '%s' is not accessible "
-               "right now", why, cfg.source_dir);
+               "reconcile (%s) skipped: RecordingPath '%s' is not accessible "
+               "right now", why, cfg.recording_path);
         return;
     }
 
@@ -276,7 +276,7 @@ static void reconcile_state(const char *why)
     gpointer key, value;
     g_hash_table_iter_init(&iter, uploaded);
     while (g_hash_table_iter_next(&iter, &key, &value)) {
-        gchar *full = g_build_filename(cfg.source_dir, (const gchar *)key, NULL);
+        gchar *full = g_build_filename(cfg.recording_path, (const gchar *)key, NULL);
         gboolean exists = g_file_test(full, G_FILE_TEST_EXISTS);
         g_free(full);
         if (!exists)
@@ -378,7 +378,7 @@ static void scan_dir(const gchar *dir, time_t now, const S3Cfg *s3,
             continue;
         }
 
-        const gchar *rel = full + strlen(cfg.source_dir);
+        const gchar *rel = full + strlen(cfg.recording_path);
         while (*rel == '/')
             rel++;
 
@@ -436,7 +436,7 @@ static gpointer sync_thread(gpointer data)
     };
     struct pass_stats st = { 0, 0, 0, 0 };
     time_t start = time(NULL);
-    scan_dir(cfg.source_dir, start, &s3, &st);
+    scan_dir(cfg.recording_path, start, &s3, &st);
     if (st.uploaded > 0 || st.failed > 0)
         syslog(LOG_INFO,
                "sync pass done in %lds: %u uploaded, %u already synced, "

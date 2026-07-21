@@ -10,7 +10,7 @@ to an S3-compatible object store (MinIO, Backblaze B2, or any SigV4 endpoint).
   fires one sync pass per tick; the first pass runs 15 s after app start. No
   camera-side schedule/pulse configuration is needed. Ticks that arrive while
   a pass is still running are skipped.
-- **Sync pass**: recursively scans `SourceDir` (default
+- **Sync pass**: recursively scans `RecordingPath` (default
   `/var/spool/storage/SD_DISK`), uploads every `.mkv` file (hardcoded — see
   below) whose mtime is at least `MIN_AGE_SECONDS` (120 s, hardcoded — see
   below) old, skipping chunks still being written, that is not already
@@ -21,8 +21,14 @@ to an S3-compatible object store (MinIO, Backblaze B2, or any SigV4 endpoint).
   hash table (relative path → size) loaded at startup. Delete the file and
   restart the app to re-upload everything. If a file's size changes after
   upload (should not happen for finalized chunks) it is re-uploaded and
-  overwritten. Survives app upgrade/reinstall (`localdata` isn't purged by a
-  plain `remove`); only a factory-reset-style wipe clears it.
+  overwritten. Whether `localdata` survives a full `remove`+reinstall is
+  **not reliable** — observed both ways in practice (survived once, was
+  wiped on a later cycle, same command sequence both times), so don't
+  count on it. An in-place upgrade (stop → upload new `.eap` → start,
+  no `remove`) reliably preserves it. If state is lost, the next sync
+  pass just re-uploads everything still on the SD card — harmless
+  (idempotent overwrites, no duplicates) but wastes bandwidth/time
+  proportional to the backlog.
 
   Neither structure is aware of what's still physically on the SD card, so
   without pruning both would grow forever — finished files are never deleted
@@ -30,12 +36,12 @@ to an S3-compatible object store (MinIO, Backblaze B2, or any SigV4 endpoint).
   path ever uploaded stays tracked regardless of whether its file was later
   cycled out. A **reconcile pass** keeps both bounded by "what currently fits
   on the SD card" instead of "everything ever uploaded since deployment": it
-  drops any tracked entry whose file no longer exists under `SourceDir`, then
+  drops any tracked entry whose file no longer exists under `RecordingPath`, then
   atomically rewrites `uploaded.txt` from what's left (temp file + rename —
   a crash mid-rewrite leaves the previous state file intact). Reconcile runs
   (a) once at startup, right after loading state — catches cruft accumulated
   across restarts — and (b) every 1024 successful uploads during normal
-  operation. If `SourceDir` itself isn't accessible when a reconcile would
+  operation. If `RecordingPath` itself isn't accessible when a reconcile would
   run (e.g. SD card not yet mounted), the whole pass is skipped rather than
   risk wiping entries for files that are only temporarily invisible.
   Verified against a real deletion (removed a recording via VAPIX
@@ -61,7 +67,7 @@ behaves on this camera).
 | `S3PathStyle` | `yes` | `yes` = `endpoint/bucket/key` (MinIO); `no` = virtual-host style |
 | `S3InsecureTLS` | `no` | `yes` = skip TLS cert verification (self-signed MinIO) |
 | `Prefix` | *(empty — auto-derived)* | Object key prefix. If empty on first run, derived from `/etc/hostname` (falls back to `axis-<eth0 MAC>` if unreadable) and **persisted back** to this parameter — check the app's Settings page after first start to see what it picked, or set it explicitly to override. |
-| `SourceDir` | `/var/spool/storage/SD_DISK` | Directory tree to sync |
+| `RecordingPath` | `/var/spool/storage/SD_DISK` | Directory tree to sync |
 | `IntervalSeconds` | `60` | Sync pass cadence (clamped to ≥ 10) |
 
 Two things are hardcoded in `sdsync.c` rather than exposed as parameters,
