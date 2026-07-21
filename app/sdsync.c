@@ -3,7 +3,7 @@
  *
  * Trigger model: an in-app monotonic timer (IntervalSeconds, default 60)
  * starts one sync pass per tick: walk SourceDir, upload every finished
- * .mkv file (mtime older than MinAgeSeconds) that is not yet in the local
+ * .mkv file (mtime older than MIN_AGE_SECONDS) that is not yet in the local
  * upload state, then record it so it is uploaded exactly once.
  * A tick that fires while a pass is still running is skipped. Files are
  * never deleted from the SD card — the camera's own FIFO cleanup reclaims
@@ -33,7 +33,6 @@ typedef struct {
     gchar *secret_key;
     gchar *prefix;
     gchar *source_dir;
-    gint min_age;
     gint interval;
     gboolean path_style;
     gboolean insecure;
@@ -147,12 +146,6 @@ static gboolean load_config(void)
     cfg.prefix = get_param(p, "Prefix", "");
     cfg.source_dir = get_param(p, "SourceDir", "/var/spool/storage/SD_DISK");
     ensure_prefix(p);
-
-    gchar *age = get_param(p, "MinAgeSeconds", "120");
-    cfg.min_age = atoi(age);
-    if (cfg.min_age < 0)
-        cfg.min_age = 0;
-    g_free(age);
 
     gchar *iv = get_param(p, "IntervalSeconds", "60");
     cfg.interval = atoi(iv);
@@ -331,6 +324,12 @@ static gboolean ext_allowed(const gchar *name)
     return g_str_has_suffix(name, RECORDING_EXTENSION);
 }
 
+/* Skip files still being actively written. Not exposed as a param: it's a
+ * safety margin against the recording pipeline's own chunking/flush
+ * behavior, not an operational choice, and a value set too low would
+ * silently risk uploading partial files. */
+#define MIN_AGE_SECONDS 120
+
 struct pass_stats {
     guint uploaded;
     guint skipped;
@@ -373,7 +372,7 @@ static void scan_dir(const gchar *dir, time_t now, const S3Cfg *s3,
             g_free(full);
             continue;
         }
-        if (now - sb.st_mtime < cfg.min_age) {
+        if (now - sb.st_mtime < MIN_AGE_SECONDS) {
             /* likely still being written */
             g_free(full);
             continue;
