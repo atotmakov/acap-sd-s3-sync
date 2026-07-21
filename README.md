@@ -4,6 +4,31 @@ Native ACAP application for Axis cameras (built for AXIS M3085-V, Ambarella
 CV25, aarch64, AXIS OS 12.x) that uploads finished recordings from the SD card
 to an S3-compatible object store (MinIO, Backblaze B2, or any SigV4 endpoint).
 
+## Problem
+
+Goal: make this camera's recordings available on external storage, subject to
+three hard constraints:
+
+- **Outbound-only.** The camera must stay invisible from the storage side
+  (and from the internet generally) — no inbound connections, no
+  open/forwarded ports. Every connection is initiated *by* the camera;
+  nothing ever reaches in to pull from it.
+- **Interruption-tolerant.** The link to external storage can drop at any
+  time — brief blips, long outages, camera reboots — and this must not lose
+  data or need manual recovery.
+- **Eventually consistent.** Given enough time, every recording that ever
+  existed on the camera ends up on external storage — not necessarily
+  immediately, but guaranteed eventually, regardless of how many failures
+  happen in between.
+
+This app is exactly that: a native ACAP that periodically pushes finished
+SD-card recordings to an S3-compatible bucket over plain outbound HTTPS PUT.
+A file is only marked synced *after* its upload actually succeeds — so a
+failed pass (network drop, endpoint unreachable, camera reboot mid-upload)
+changes nothing, and the next timer tick just retries whatever's still
+outstanding. No inbound service, no listening port, no coordination
+required — the system converges on its own.
+
 ## Design
 
 - **Trigger**: an in-app monotonic timer (`IntervalSeconds`, default 60 s)
