@@ -14,7 +14,7 @@
             "vendor": "atotmakov",
             "embeddedSdkVersion": "3.0",
             "runMode": "respawn",
-            "version": "0.4.0"
+            "version": "0.5.0"
         },
         "configuration": {
             "paramConfig": [
@@ -26,7 +26,6 @@
                 { "name": "Prefix",        "default": "",                               "type": "string" },
                 { "name": "SourceDir",     "default": "/var/spool/storage/SD_DISK",     "type": "string" },
                 { "name": "IntervalSeconds", "default": "60",                           "type": "string" },
-                { "name": "Extensions",    "default": ".mkv",                           "type": "string" },
                 { "name": "MinAgeSeconds", "default": "120",                            "type": "string" },
                 { "name": "PathStyle",     "default": "yes",                            "type": "string" },
                 { "name": "InsecureTLS",   "default": "no",                             "type": "string" }

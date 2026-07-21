@@ -2,9 +2,9 @@
  * sds3sync — push finished SD-card recordings to S3-compatible storage.
  *
  * Trigger model: an in-app monotonic timer (IntervalSeconds, default 60)
- * starts one sync pass per tick: walk SourceDir, upload every finished file
- * (mtime older than MinAgeSeconds, extension in Extensions) that is not yet
- * in the local upload state, then record it so it is uploaded exactly once.
+ * starts one sync pass per tick: walk SourceDir, upload every finished
+ * .mkv file (mtime older than MinAgeSeconds) that is not yet in the local
+ * upload state, then record it so it is uploaded exactly once.
  * A tick that fires while a pass is still running is skipped. Files are
  * never deleted from the SD card — the camera's own FIFO cleanup reclaims
  * space.
@@ -33,7 +33,6 @@ typedef struct {
     gchar *secret_key;
     gchar *prefix;
     gchar *source_dir;
-    gchar **extensions;   /* NULL-terminated, each like ".mkv" */
     gint min_age;
     gint interval;
     gboolean path_style;
@@ -148,12 +147,6 @@ static gboolean load_config(void)
     cfg.prefix = get_param(p, "Prefix", "");
     cfg.source_dir = get_param(p, "SourceDir", "/var/spool/storage/SD_DISK");
     ensure_prefix(p);
-
-    gchar *ext = get_param(p, "Extensions", ".mkv");
-    cfg.extensions = g_strsplit(ext, ",", -1);
-    for (gchar **e = cfg.extensions; *e; e++)
-        g_strstrip(*e);
-    g_free(ext);
 
     gchar *age = get_param(p, "MinAgeSeconds", "120");
     cfg.min_age = atoi(age);
@@ -325,15 +318,17 @@ static gchar *urlencode_key(const char *key)
     return g_string_free(s, FALSE);
 }
 
+/* Axis edge storage keeps non-video artifacts (e.g. index.db) alongside
+ * recordings in the same directory tree; this is what filters them out.
+ * Hardcoded rather than a param: the container format is dictated by the
+ * camera's own recording engine, not an operational choice, and a wrong
+ * value here fails silently (zero uploads, indistinguishable from "no new
+ * recordings"), so it isn't worth exposing as something to misconfigure. */
+#define RECORDING_EXTENSION ".mkv"
+
 static gboolean ext_allowed(const gchar *name)
 {
-    for (gchar **e = cfg.extensions; *e; e++) {
-        if (**e == '\0')
-            continue;
-        if (g_str_has_suffix(name, *e))
-            return TRUE;
-    }
-    return FALSE;
+    return g_str_has_suffix(name, RECORDING_EXTENSION);
 }
 
 struct pass_stats {

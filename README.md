@@ -11,10 +11,11 @@ to an S3-compatible object store (MinIO, Backblaze B2, or any SigV4 endpoint).
   camera-side schedule/pulse configuration is needed. Ticks that arrive while
   a pass is still running are skipped.
 - **Sync pass**: recursively scans `SourceDir` (default
-  `/var/spool/storage/SD_DISK`), uploads every file matching `Extensions`
-  whose mtime is at least `MinAgeSeconds` old (default 120 s — skips chunks
-  still being written) and that is not already recorded in the local state
-  file. Upload once, keep on SD; the camera's own FIFO cleanup reclaims space.
+  `/var/spool/storage/SD_DISK`), uploads every `.mkv` file (hardcoded — see
+  below) whose mtime is at least `MinAgeSeconds` old (default 120 s — skips
+  chunks still being written) and that is not already recorded in the local
+  state file. Upload once, keep on SD; the camera's own FIFO cleanup
+  reclaims space.
 - **State**: `/usr/local/packages/sds3sync/localdata/uploaded.txt`, one
   `size<TAB>relative-path` line per uploaded file, mirrored into an in-memory
   hash table (relative path → size) loaded at startup. Delete the file and
@@ -56,10 +57,17 @@ to an S3-compatible object store (MinIO, Backblaze B2, or any SigV4 endpoint).
 | `Prefix` | *(empty — auto-derived)* | Object key prefix. If empty on first run, derived from `/etc/hostname` (falls back to `axis-<eth0 MAC>` if unreadable) and **persisted back** to this parameter — check the app's Settings page after first start to see what it picked, or set it explicitly to override. |
 | `SourceDir` | `/var/spool/storage/SD_DISK` | Directory tree to sync |
 | `IntervalSeconds` | `60` | Sync pass cadence (clamped to ≥ 10) |
-| `Extensions` | `.mkv` | Comma-separated suffix list |
 | `MinAgeSeconds` | `120` | Skip files modified more recently than this |
 | `PathStyle` | `yes` | `yes` = `endpoint/bucket/key` (MinIO); `no` = virtual-host style |
 | `InsecureTLS` | `no` | `yes` = skip TLS cert verification (self-signed MinIO) |
+
+The recording extension (`.mkv`) is **not** a parameter — it's hardcoded
+(`RECORDING_EXTENSION` in `sdsync.c`). The container format is dictated by
+the camera's own recording engine, not an operational choice, and a wrong
+value here fails silently (zero uploads, indistinguishable from "no new
+recordings") — not worth exposing as something to misconfigure. If this app
+is ever installed on a camera generation that writes a different container
+format, change the constant and rebuild.
 
 The app starts idle if `Endpoint`/`AccessKey`/`SecretKey` are unset —
 configure them, then restart the app.
