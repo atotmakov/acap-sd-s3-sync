@@ -21,6 +21,31 @@ three hard constraints:
   immediately, but guaranteed eventually, regardless of how many failures
   happen in between.
 
+```mermaid
+flowchart LR
+    classDef node fill:#eef2f7,stroke:#9fb0c5,stroke-width:1.5px,color:#16202c;
+    classDef store fill:#e6f6f4,stroke:#0e9488,stroke-width:2px,color:#0b3b36;
+
+    subgraph onsite [On-site — not reachable from outside]
+        SD[("SD_DISK\nlocal buffer")]
+        CAM["AXIS camera\nsds3sync ACAP"]
+        SD --- CAM
+    end
+
+    ROUTER["Router / NAT\nno forwarded ports"]
+    NET((Internet))
+
+    subgraph offsite [Off-site]
+        S3[("S3-compatible\nstorage")]
+    end
+
+    CAM -- "outbound HTTPS PUT\ncamera-initiated, retries on failure" --> ROUTER --> NET --> S3
+    NET -- "no inbound path" --x CAM
+
+    class CAM,ROUTER node
+    class SD,S3 store
+```
+
 This app is exactly that: a native ACAP that periodically pushes finished
 SD-card recordings to an S3-compatible bucket over plain outbound HTTPS PUT.
 A file is only marked synced *after* its upload actually succeeds — so a
