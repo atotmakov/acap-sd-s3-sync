@@ -178,35 +178,3 @@ curl -s --digest -u root:<pw> "http://<camera-ip>/axis-cgi/admin/systemlog.cgi" 
   `UNSIGNED-PAYLOAD` — fine for MinIO/B2 over TLS; AWS S3 proper also accepts
   it, but signed-payload support would need to be added for policies that
   require `x-amz-content-sha256` to be a real digest.
-
-## TODO
-
-- ~~Migrate `manifest.json` to schema v2.x~~ — done (`2.2.0`). Verified
-  against Axis's own official example manifests
-  (`hello-world`, `axparameter`, `axstorage` in `acap-native-sdk-examples`),
-  not just docs: `embeddedSdkVersion` removed, `vendorId` and
-  `compatibleOsVersions` added, `paramConfig` and
-  `resources.linux.user.groups` unchanged. **`vendorId` is currently the
-  Axis SDK-examples placeholder (`1234567890`)** — real vendor registration
-  through Axis is still required before this app can actually be submitted
-  to the ACAP Signing Service (https://developer.axis.com/acap/how-to-guides/service-portal/acap-application-signing/).
-  `compatibleOsVersions` is set to `{"min": "12.0", "max": "13"}` — `min`
-  reflects only what's actually been run (this camera's AXIS OS 12.x line),
-  not a claim that older AXIS OS is incompatible, just unverified; `max` is
-  required by the toolchain (see below) and matches what Axis's own
-  examples use. No API for signing exists either way (manual browser
-  upload/download only), so this change unblocks a manual signing step,
-  not automation. Still unsigned
-  (`SignatureStatus="Unknown"`) and still installs/runs fine on AXIS OS
-  12.11.72 despite Axis's docs stating 12.0+ only allows signed apps by
-  default — that discrepancy is unresolved, worth re-checking on a future
-  firmware update.
-
-  One build-time surprise worth flagging for next time: the real
-  `acap-build` validator (in the `axisecp/acap-native-sdk:latest-aarch64`
-  image) rejects a `compatibleOsVersions` entry with only `min` —
-  `jsonschema.exceptions.ValidationError: 'max' is a required property` —
-  even though Axis's own committed example manifests only set `max`. Those
-  examples are apparently stale relative to the schema the current
-  toolchain actually enforces; don't trust them as the sole reference for
-  a future schema bump, always verify against a real build.
