@@ -1,5 +1,5 @@
 {
-    "schemaVersion": "1.7.1",
+    "schemaVersion": "2.2.0",
     "resources": {
         "linux": {
             "user": {
@@ -12,9 +12,13 @@
             "appName": "sds3sync",
             "friendlyName": "SD to S3 Sync",
             "vendor": "atotmakov",
-            "embeddedSdkVersion": "3.0",
+            "vendorId": "1234567890",
+            "vendorUrl": "https://github.com/atotmakov/acap-sd-s3-sync",
             "runMode": "respawn",
-            "version": "0.8.0"
+            "version": "0.9.0",
+            "compatibleOsVersions": [
+                { "min": "12.0" }
+            ]
         },
         "configuration": {
             "paramConfig": [

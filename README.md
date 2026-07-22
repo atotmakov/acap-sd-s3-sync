@@ -181,11 +181,21 @@ curl -s --digest -u root:<pw> "http://<camera-ip>/axis-cgi/admin/systemlog.cgi" 
 
 ## TODO
 
-- **Migrate `manifest.json` to schema v2.x** (currently `1.7.1`). Prerequisite
-  for using Axis's ACAP Signing Service (https://developer.axis.com/acap/how-to-guides/service-portal/acap-application-signing/)
-  — the non-TIP signing path only accepts v2.x manifests. No API for signing
-  exists either way (confirmed: manual browser upload/download only), so this
-  unblocks a manual signing step, not automation. Currently unsigned
-  (`SignatureStatus="Unknown"`) but installs and runs fine on this camera's
-  AXIS OS 12.11.72 despite Axis's docs stating 12.0+ only allows signed apps
-  by default — worth re-checking if that changes on a future firmware update.
+- ~~Migrate `manifest.json` to schema v2.x~~ — done (`2.2.0`). Verified
+  against Axis's own official example manifests
+  (`hello-world`, `axparameter`, `axstorage` in `acap-native-sdk-examples`),
+  not just docs: `embeddedSdkVersion` removed, `vendorId` and
+  `compatibleOsVersions` added, `paramConfig` and
+  `resources.linux.user.groups` unchanged. **`vendorId` is currently the
+  Axis SDK-examples placeholder (`1234567890`)** — real vendor registration
+  through Axis is still required before this app can actually be submitted
+  to the ACAP Signing Service (https://developer.axis.com/acap/how-to-guides/service-portal/acap-application-signing/).
+  `compatibleOsVersions` is set to `{"min": "12.0"}`, reflecting only what's
+  actually been run (this camera's AXIS OS 12.x line) — not a claim that
+  older AXIS OS is incompatible, just unverified. No API for signing exists
+  either way (manual browser upload/download only), so this change unblocks
+  a manual signing step, not automation. Still unsigned
+  (`SignatureStatus="Unknown"`) and still installs/runs fine on AXIS OS
+  12.11.72 despite Axis's docs stating 12.0+ only allows signed apps by
+  default — that discrepancy is unresolved, worth re-checking on a future
+  firmware update.
