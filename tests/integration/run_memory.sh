@@ -65,6 +65,14 @@ churn_rss=()
 churn_entries=()
 plateau_rss=()
 
+# g_timeout_add_seconds() deliberately batches/aligns timers for power
+# efficiency and its own docs warn callbacks "may be delayed... should
+# not be relied on for precise timing" -- give each expected pass a
+# generous multiple of the interval rather than a flat timeout, so we
+# only fail on a genuine stall, not ordinary GLib timer coarseness or a
+# busy CI runner.
+PASS_TIMEOUT=$((INTERVAL * 6))
+
 seq_n=0
 log "churn phase: $CHURN_PASSES passes, $FILES_PER_CHURN_PASS new files each"
 for i in $(seq 1 "$CHURN_PASSES"); do
@@ -72,7 +80,7 @@ for i in $(seq 1 "$CHURN_PASSES"); do
         seq_n=$((seq_n + 1))
         seed_recording "$RECORDING_DIR" "churn_${seq_n}.mkv"
     done
-    if ! wait_for_pass "$PID" "$i" 30; then
+    if ! wait_for_pass "$PID" "$i" "$PASS_TIMEOUT"; then
         log "FAIL: churn pass $i did not complete within timeout"
         dump_logs "$PID"
         kill_daemon "$PID"
@@ -92,7 +100,7 @@ churn_done=$seq_n
 log "plateau phase: $PLATEAU_PASSES passes, zero new files"
 base_pass=$CHURN_PASSES
 for i in $(seq 1 "$PLATEAU_PASSES"); do
-    if ! wait_for_pass "$PID" "$((base_pass + i))" 30; then
+    if ! wait_for_pass "$PID" "$((base_pass + i))" "$PASS_TIMEOUT"; then
         log "FAIL: plateau pass $i did not complete within timeout"
         dump_logs "$PID"
         kill_daemon "$PID"
