@@ -18,9 +18,9 @@
 #include <syslog.h>
 #include <time.h>
 
-#include <axsdk/axparameter.h>
 #include <curl/curl.h>
 
+#include "paramstore.h"
 #include "s3put.h"
 
 #define APP_NAME "sds3sync"
@@ -47,20 +47,6 @@ static gint sync_running = 0;
 /* ------------------------------------------------------------------ */
 /* Config                                                              */
 /* ------------------------------------------------------------------ */
-
-static gchar *get_param(AXParameter *p, const char *name, const char *fallback)
-{
-    gchar *v = NULL;
-    GError *err = NULL;
-    if (!ax_parameter_get(p, name, &v, &err)) {
-        if (err)
-            g_error_free(err);
-        v = g_strdup(fallback);
-    }
-    if (v)
-        g_strstrip(v);
-    return v;
-}
 
 static gboolean param_yes(const gchar *v)
 {
@@ -109,17 +95,15 @@ static gchar *derive_hostname_prefix(void)
 
 /* If Prefix is unset, derive it from the camera's identity and persist it
  * so the UI reflects the real value on subsequent views/restarts. */
-static void ensure_prefix(AXParameter *p)
+static void ensure_prefix(ParamStore *ps)
 {
     if (cfg.prefix[0] != '\0')
         return;
 
     gchar *derived = derive_hostname_prefix();
-    GError *err = NULL;
-    if (!ax_parameter_set(p, "Prefix", derived, TRUE, &err)) {
-        syslog(LOG_WARNING, "could not persist auto-derived Prefix '%s': %s",
-               derived, err ? err->message : "unknown");
-        g_clear_error(&err);
+    if (!paramstore_set(ps, "Prefix", derived)) {
+        syslog(LOG_WARNING, "could not persist auto-derived Prefix '%s'",
+               derived);
     } else {
         syslog(LOG_INFO, "auto-derived Prefix on first run: '%s'", derived);
     }
@@ -129,35 +113,32 @@ static void ensure_prefix(AXParameter *p)
 
 static gboolean load_config(void)
 {
-    GError *err = NULL;
-    AXParameter *p = ax_parameter_new(APP_NAME, &err);
-    if (p == NULL) {
-        syslog(LOG_ERR, "ax_parameter_new failed: %s",
-               err ? err->message : "unknown");
-        g_clear_error(&err);
+    ParamStore *ps = paramstore_open(APP_NAME);
+    if (ps == NULL) {
+        syslog(LOG_ERR, "paramstore_open failed");
         return FALSE;
     }
 
-    cfg.endpoint = get_param(p, "S3Endpoint", "");
-    cfg.bucket = get_param(p, "S3Bucket", "cctv");
-    cfg.region = get_param(p, "S3Region", "us-east-1");
-    cfg.access_key = get_param(p, "S3AccessKey", "");
-    cfg.secret_key = get_param(p, "S3SecretKey", "");
-    cfg.prefix = get_param(p, "Prefix", "");
-    cfg.recording_path = get_param(p, "RecordingPath", "/var/spool/storage/SD_DISK");
-    ensure_prefix(p);
+    cfg.endpoint = paramstore_get(ps, "S3Endpoint", "");
+    cfg.bucket = paramstore_get(ps, "S3Bucket", "cctv");
+    cfg.region = paramstore_get(ps, "S3Region", "us-east-1");
+    cfg.access_key = paramstore_get(ps, "S3AccessKey", "");
+    cfg.secret_key = paramstore_get(ps, "S3SecretKey", "");
+    cfg.prefix = paramstore_get(ps, "Prefix", "");
+    cfg.recording_path = paramstore_get(ps, "RecordingPath", "/var/spool/storage/SD_DISK");
+    ensure_prefix(ps);
 
-    gchar *iv = get_param(p, "IntervalSeconds", "60");
+    gchar *iv = paramstore_get(ps, "IntervalSeconds", "60");
     cfg.interval = atoi(iv);
     if (cfg.interval < 10)
         cfg.interval = 10; /* protect against hammering the SD card */
     g_free(iv);
 
-    gchar *ps = get_param(p, "S3PathStyle", "yes");
-    cfg.path_style = param_yes(ps);
-    g_free(ps);
+    gchar *path_style_str = paramstore_get(ps, "S3PathStyle", "yes");
+    cfg.path_style = param_yes(path_style_str);
+    g_free(path_style_str);
 
-    gchar *ins = get_param(p, "S3InsecureTLS", "no");
+    gchar *ins = paramstore_get(ps, "S3InsecureTLS", "no");
     cfg.insecure = param_yes(ins);
     g_free(ins);
 
@@ -169,7 +150,7 @@ static gboolean load_config(void)
     while (n > 1 && cfg.recording_path[n - 1] == '/')
         cfg.recording_path[--n] = '\0';
 
-    ax_parameter_free(p);
+    paramstore_close(ps);
 
     if (cfg.endpoint[0] == '\0' || cfg.access_key[0] == '\0' ||
         cfg.secret_key[0] == '\0') {
@@ -484,9 +465,16 @@ int main(void)
     openlog(APP_NAME, LOG_PID, LOG_USER);
     syslog(LOG_INFO, "starting");
 
-    state_path =
-        g_strdup_printf("/usr/local/packages/%s/localdata/uploaded.txt",
-                        APP_NAME);
+    /* SDS3SYNC_STATE_PATH lets integration tests point this at a scratch
+     * file instead of a root-owned system path; unset in production, so
+     * the real path is unchanged there. */
+    const char *env_state_path = g_getenv("SDS3SYNC_STATE_PATH");
+    if (env_state_path != NULL) {
+        state_path = g_strdup(env_state_path);
+    } else {
+        state_path = g_strdup_printf(
+            "/usr/local/packages/%s/localdata/uploaded.txt", APP_NAME);
+    }
 
     gboolean configured = load_config();
     load_state();
