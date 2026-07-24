@@ -1,0 +1,27 @@
+services:
+  minio:
+    image: minio/minio:latest
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: testkey
+      MINIO_ROOT_PASSWORD: testsecret123
+    ports:
+      - "9000:9000" # direct -- used for verification (mc) and health check
+      - "9001:9001" # console, local debugging only
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 2s
+      timeout: 2s
+      retries: 30
+
+  toxiproxy:
+    image: ghcr.io/shopify/toxiproxy:2.9.0
+    depends_on:
+      minio:
+        condition: service_healthy
+    volumes:
+      - ./toxiproxy.json:/etc/toxiproxy/toxiproxy.json:ro
+    command: ["-host=0.0.0.0", "-config=/etc/toxiproxy/toxiproxy.json"]
+    ports:
+      - "8474:8474" # toxiproxy control API -- used by fault-injection scenarios
+      - "9010:9010" # proxied path to minio:9000 -- what the daemon under test talks to

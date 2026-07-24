@@ -6,7 +6,7 @@ on:
   workflow_dispatch:
 
 jobs:
-  host-build:
+  integration:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
@@ -32,3 +32,26 @@ jobs:
           test -x ./sds3sync-host-asan
           file ./sds3sync-host ./sds3sync-host-asan
           ldd ./sds3sync-host | grep -q axparameter && exit 1 || true
+
+      - name: Install MinIO client (mc)
+        run: |
+          curl -sSL https://dl.min.io/client/mc/release/linux-amd64/mc -o /usr/local/bin/mc
+          chmod +x /usr/local/bin/mc
+
+      - name: Start MinIO + toxiproxy
+        working-directory: tests/integration
+        run: docker compose up -d
+
+      - name: Run happy-path scenario
+        working-directory: tests/integration
+        run: ./run_happy_path.sh
+
+      - name: Dump service logs on failure
+        if: failure()
+        working-directory: tests/integration
+        run: docker compose logs
+
+      - name: Tear down
+        if: always()
+        working-directory: tests/integration
+        run: docker compose down -v
