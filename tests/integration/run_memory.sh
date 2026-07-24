@@ -42,6 +42,9 @@ PLATEAU_GROWTH_BUDGET_PCT="${PLATEAU_GROWTH_BUDGET_PCT:-15}"
 
 dump_logs() {
     local pid="$1"
+    # Diagnostics first, before anything kills the process -- is_alive
+    # and the gdb backtrace are only meaningful while it's still running.
+    dump_process_diagnostics "$pid"
     echo "--- syslog (pid $pid), tail ---" >&2
     daemon_syslog "$pid" | tail -40 >&2 || true
     echo "--- crash.log ---" >&2

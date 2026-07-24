@@ -146,6 +146,32 @@ is_alive() {
     kill -0 "$pid" 2>/dev/null
 }
 
+# Full diagnostic dump for a suspected hang/crash: is it even alive, what's
+# each thread doing (via gdb if available -- distinguishes "stuck in a
+# curl/network call" from "stuck on a mutex/lock" from "actually dead"
+# far better than logs alone can), and its /proc/status.
+dump_process_diagnostics() {
+    local pid="$1"
+    if is_alive "$pid"; then
+        echo "process $pid is ALIVE" >&2
+        echo "--- /proc/$pid/status ---" >&2
+        cat "/proc/$pid/status" 2>/dev/null >&2 || true
+        echo "--- /proc/$pid/task/*/stack (kernel-side, if readable) ---" >&2
+        for t in /proc/"$pid"/task/*/; do
+            local tid; tid=$(basename "$t")
+            echo "task $tid wchan: $(cat "$t/wchan" 2>/dev/null || echo '?')" >&2
+        done
+        if command -v gdb >/dev/null 2>&1; then
+            echo "--- gdb: thread apply all bt ---" >&2
+            sudo gdb -p "$pid" -batch -ex "thread apply all bt" 2>&1 >&2 || true
+        else
+            echo "(gdb not available -- no thread backtrace)" >&2
+        fi
+    else
+        echo "process $pid is DEAD (not a hang -- it exited/crashed)" >&2
+    fi
+}
+
 rss_kb() {
     local pid="$1"
     awk '/VmRSS/{print $2}' "/proc/$pid/status" 2>/dev/null || echo ""

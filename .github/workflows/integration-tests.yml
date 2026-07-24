@@ -15,7 +15,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            build-essential pkg-config libglib2.0-dev libcurl4-openssl-dev libssl-dev
+            build-essential pkg-config libglib2.0-dev libcurl4-openssl-dev libssl-dev gdb
 
       - name: Build host binary
         working-directory: app
