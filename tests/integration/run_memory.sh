@@ -96,16 +96,16 @@ for i in $(seq 1 "$CHURN_PASSES"); do
     log "churn pass $i: rss=${r}KB tracked=${e}"
 done
 
-churn_done=$seq_n
 log "plateau phase: $PLATEAU_PASSES passes, zero new files"
-base_pass=$CHURN_PASSES
+# Can't use wait_for_pass here: scan_dir() deliberately doesn't log
+# "sync pass done" for a pass that uploads nothing (st.uploaded == 0 &&
+# st.failed == 0) -- sensible, avoids spamming the log every tick once
+# everything's caught up, but it means log-line counting has no signal
+# to count during a phase that is *specifically* "nothing new happens
+# every pass". Sample on a wall-clock cadence instead; the churn phase
+# already established passes really do fire every INTERVAL seconds.
 for i in $(seq 1 "$PLATEAU_PASSES"); do
-    if ! wait_for_pass "$PID" "$((base_pass + i))" "$PASS_TIMEOUT"; then
-        log "FAIL: plateau pass $i did not complete within timeout"
-        dump_logs "$PID"
-        kill_daemon "$PID"
-        exit 1
-    fi
+    sleep "$INTERVAL"
     if ! is_alive "$PID"; then
         log "FAIL: daemon died during plateau phase (pass $i)"
         dump_logs "$PID"
@@ -113,7 +113,7 @@ for i in $(seq 1 "$PLATEAU_PASSES"); do
     fi
     r=$(rss_kb "$PID")
     plateau_rss+=("$r")
-    log "plateau pass $i: rss=${r}KB tracked=$(tracked_entry_count "$TEST_NAME")"
+    log "plateau sample $i: rss=${r}KB tracked=$(tracked_entry_count "$TEST_NAME")"
 done
 
 stop_daemon "$PID"
