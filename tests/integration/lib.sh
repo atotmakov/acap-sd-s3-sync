@@ -102,9 +102,13 @@ RecordingPath=$recording_dir
 IntervalSeconds=$interval
 EOF
 
+    # sdsync.c logs via syslog(), not stdout/stderr, so this redirection
+    # only ever catches a genuine process-level crash (glib abort, ASan
+    # report, segfault message) -- normal operational logging is read via
+    # daemon_syslog() below, filtered by this PID.
     SDS3SYNC_PARAM_FILE="$param_file" \
     SDS3SYNC_STATE_PATH="$run_dir/uploaded.txt" \
-        "$APP_DIR/sds3sync-host" > "$run_dir/daemon.log" 2>&1 &
+        "$APP_DIR/sds3sync-host" > "$run_dir/crash.log" 2>&1 &
     local pid=$!
     echo "$pid" > "$run_dir/pid"
     echo "$pid"
@@ -119,7 +123,7 @@ restart_daemon() {
 
     SDS3SYNC_PARAM_FILE="$param_file" \
     SDS3SYNC_STATE_PATH="$run_dir/uploaded.txt" \
-        "$APP_DIR/sds3sync-host" >> "$run_dir/daemon.log" 2>&1 &
+        "$APP_DIR/sds3sync-host" >> "$run_dir/crash.log" 2>&1 &
     local pid=$!
     echo "$pid" > "$run_dir/pid"
     echo "$pid"
@@ -152,25 +156,39 @@ thread_count() {
     awk '/Threads/{print $2}' "/proc/$pid/status" 2>/dev/null || echo ""
 }
 
-# Counts "sync pass done" lines in the daemon log. grep -c always prints a
+# sdsync.c logs its operational messages ("uploaded ...", "sync pass
+# done ...", "reconcile ...") via syslog(), not stdout/stderr -- on a real
+# camera that's read via systemlog.cgi; here it lands in the host's
+# journal. Filtered by PID so concurrent/sequential scenario runs (all
+# using the same openlog() ident "sds3sync") don't see each other's
+# lines. Tries journalctl first (systemd, the normal case on ubuntu-latest
+# runners), falls back to /var/log/syslog.
+daemon_syslog() {
+    local pid="$1"
+    if command -v journalctl >/dev/null 2>&1; then
+        sudo journalctl --no-pager -t sds3sync 2>/dev/null | grep "sds3sync\[$pid\]:" && return
+    fi
+    if [ -e /var/log/syslog ]; then
+        sudo grep "sds3sync\[$pid\]:" /var/log/syslog 2>/dev/null && return
+    fi
+    return 0
+}
+
+# Counts "sync pass done" lines for this PID. grep -c always prints a
 # valid count (0 or more) even when it finds nothing -- its exit status is
 # 1 in that case, which is *not* a real error, so don't treat it as one
 # (an `|| echo 0` fallback here would double-print: grep's own "0" plus
-# the fallback's "0"). Only the file-not-yet-created case needs a fallback.
+# the fallback's "0").
 pass_count() {
-    local log_file="$1"
-    if [ ! -f "$log_file" ]; then
-        echo 0
-        return
-    fi
-    grep -c "sync pass done" "$log_file" 2>/dev/null || true
+    local pid="$1"
+    daemon_syslog "$pid" | grep -c "sync pass done" || true
 }
 
-# Waits until the daemon's log shows at least $2 "sync pass done" lines.
+# Waits until this PID's log shows at least $2 "sync pass done" lines.
 wait_for_pass() {
-    local log_file="$1" n="$2" timeout="${3:-40}"
+    local pid="$1" n="$2" timeout="${3:-40}"
     for _ in $(seq 1 "$timeout"); do
-        if [ "$(pass_count "$log_file")" -ge "$n" ]; then
+        if [ "$(pass_count "$pid")" -ge "$n" ]; then
             return 0
         fi
         sleep 1

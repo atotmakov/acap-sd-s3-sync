@@ -3,11 +3,19 @@
 # sds3sync-host binary against MinIO through toxiproxy (no toxics active),
 # confirm every file lands in the bucket. This is the harness's own
 # self-test -- proves the plumbing (host build, param file, toxiproxy
-# passthrough, bucket verification) actually works before any of the
-# fault-injection scenarios build on top of it.
+# passthrough, syslog capture, bucket verification) actually works before
+# any of the fault-injection scenarios build on top of it.
 set -euo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")"
 source ./lib.sh
+
+dump_logs() {
+    local pid="$1" run_dir="$SCRATCH_ROOT/happy-path"
+    echo "--- syslog (pid $pid) ---" >&2
+    daemon_syslog "$pid" >&2 || true
+    echo "--- crash.log ---" >&2
+    cat "$run_dir/crash.log" >&2 2>/dev/null || true
+}
 
 wait_for_minio
 wait_for_toxiproxy
@@ -24,11 +32,9 @@ done
 PID=$(start_daemon "happy-path" "$RECORDING_DIR" 3)
 log "daemon started, pid=$PID"
 
-LOG_FILE="$SCRATCH_ROOT/happy-path/daemon.log"
-if ! wait_for_pass "$LOG_FILE" 1 40; then
+if ! wait_for_pass "$PID" 1 40; then
     log "FAIL: no sync pass completed within timeout"
-    echo "--- daemon.log ---" >&2
-    cat "$LOG_FILE" >&2 || true
+    dump_logs "$PID"
     kill_daemon "$PID"
     exit 1
 fi
@@ -42,7 +48,6 @@ if [ "$COUNT" -eq "$N" ]; then
     exit 0
 else
     log "FAIL: expected $N objects in bucket, found $COUNT"
-    echo "--- daemon.log ---" >&2
-    cat "$LOG_FILE" >&2 || true
+    dump_logs "$PID"
     exit 1
 fi
