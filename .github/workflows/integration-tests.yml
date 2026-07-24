@@ -46,6 +46,10 @@ jobs:
         working-directory: tests/integration
         run: ./run_happy_path.sh
 
+      - name: Run memory scenario
+        working-directory: tests/integration
+        run: ./run_memory.sh
+
       - name: Dump service logs on failure
         if: failure()
         working-directory: tests/integration

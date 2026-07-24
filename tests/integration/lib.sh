@@ -156,6 +156,26 @@ thread_count() {
     awk '/Threads/{print $2}' "/proc/$pid/status" 2>/dev/null || echo ""
 }
 
+# Number of files sds3sync currently believes are synced -- one line per
+# tracked entry in its state file. Lets memory-scenario samples be
+# normalized against corpus size instead of gated on raw RSS.
+tracked_entry_count() {
+    local test_name="$1"
+    local state_file="$SCRATCH_ROOT/$test_name/uploaded.txt"
+    if [ -f "$state_file" ]; then
+        wc -l < "$state_file" | tr -d ' '
+    else
+        echo 0
+    fi
+}
+
+# Average of the values in a whitespace/newline-separated list. Used to
+# compare RSS across the first vs. second half of a sample window without
+# pulling in a real stats tool.
+avg() {
+    awk '{ sum += $1; n += 1 } END { if (n > 0) printf "%d", sum / n; else print 0 }'
+}
+
 # sdsync.c logs its operational messages ("uploaded ...", "sync pass
 # done ...", "reconcile ...") via syslog(), not stdout/stderr -- on a real
 # camera that's read via systemlog.cgi; here it lands in the host's
