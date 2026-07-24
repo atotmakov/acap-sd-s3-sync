@@ -152,21 +152,28 @@ thread_count() {
     awk '/Threads/{print $2}' "/proc/$pid/status" 2>/dev/null || echo ""
 }
 
+# Counts "sync pass done" lines in the daemon log. grep -c always prints a
+# valid count (0 or more) even when it finds nothing -- its exit status is
+# 1 in that case, which is *not* a real error, so don't treat it as one
+# (an `|| echo 0` fallback here would double-print: grep's own "0" plus
+# the fallback's "0"). Only the file-not-yet-created case needs a fallback.
+pass_count() {
+    local log_file="$1"
+    if [ ! -f "$log_file" ]; then
+        echo 0
+        return
+    fi
+    grep -c "sync pass done" "$log_file" 2>/dev/null || true
+}
+
 # Waits until the daemon's log shows at least $2 "sync pass done" lines.
 wait_for_pass() {
     local log_file="$1" n="$2" timeout="${3:-40}"
     for _ in $(seq 1 "$timeout"); do
-        local count
-        count=$(grep -c "sync pass done" "$log_file" 2>/dev/null || echo 0)
-        if [ "$count" -ge "$n" ]; then
+        if [ "$(pass_count "$log_file")" -ge "$n" ]; then
             return 0
         fi
         sleep 1
     done
     return 1
-}
-
-pass_count() {
-    local log_file="$1"
-    grep -c "sync pass done" "$log_file" 2>/dev/null || echo 0
 }
