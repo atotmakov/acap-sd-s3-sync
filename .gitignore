@@ -1,3 +1,7 @@
 build/
 *.eap
 *.o
+tools/s3-to-smb-sync/settings.json
+tools/s3-to-smb-sync/rclone.conf
+tools/s3-to-smb-sync/rclone/
+tools/s3-to-smb-sync/sync.log

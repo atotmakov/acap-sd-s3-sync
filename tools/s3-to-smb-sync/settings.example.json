@@ -1,0 +1,10 @@
+{
+  "sync_period": 300,
+  "s3_id": "",
+  "s3_key": "",
+  "s3_backet": "",
+  "s3_endpoint": "https://minio.example.com:9000",
+  "smb_path": "\\\\nas\\share\\recordings",
+  "smb_user": "",
+  "smb_pass": ""
+}
