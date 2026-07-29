@@ -3,7 +3,7 @@
  *
  * Trigger model: an in-app monotonic timer (IntervalSeconds, default 60)
  * starts one sync pass per tick: walk RecordingPath, upload every finished
- * .mkv file (mtime older than MIN_AGE_SECONDS) that is not yet in the local
+ * file (mtime older than MIN_AGE_SECONDS) that is not yet in the local
  * upload state, then record it so it is uploaded exactly once.
  * A tick that fires while a pass is still running is skipped. Files are
  * never deleted from the SD card — the camera's own FIFO cleanup reclaims
@@ -292,19 +292,6 @@ static gchar *urlencode_key(const char *key)
     return g_string_free(s, FALSE);
 }
 
-/* Axis edge storage keeps non-video artifacts (e.g. index.db) alongside
- * recordings in the same directory tree; this is what filters them out.
- * Hardcoded rather than a param: the container format is dictated by the
- * camera's own recording engine, not an operational choice, and a wrong
- * value here fails silently (zero uploads, indistinguishable from "no new
- * recordings"), so it isn't worth exposing as something to misconfigure. */
-#define RECORDING_EXTENSION ".mkv"
-
-static gboolean ext_allowed(const gchar *name)
-{
-    return g_str_has_suffix(name, RECORDING_EXTENSION);
-}
-
 /* Skip files still being actively written. Not exposed as a param: it's a
  * safety margin against the recording pipeline's own chunking/flush
  * behavior, not an operational choice, and a value set too low would
@@ -340,10 +327,6 @@ static void scan_dir(const gchar *dir, time_t now, const S3Cfg *s3,
         }
         if (g_file_test(full, G_FILE_TEST_IS_DIR)) {
             scan_dir(full, now, s3, st);
-            g_free(full);
-            continue;
-        }
-        if (!ext_allowed(name)) {
             g_free(full);
             continue;
         }

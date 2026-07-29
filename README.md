@@ -61,11 +61,13 @@ required — the system converges on its own.
   camera-side schedule/pulse configuration is needed. Ticks that arrive while
   a pass is still running are skipped.
 - **Sync pass**: recursively scans `RecordingPath` (default
-  `/var/spool/storage/SD_DISK`), uploads every `.mkv` file (hardcoded — see
-  below) whose mtime is at least `MIN_AGE_SECONDS` (120 s, hardcoded — see
-  below) old, skipping chunks still being written, that is not already
-  recorded in the local state file. Upload once, keep on SD; the camera's
-  own FIFO cleanup reclaims space.
+  `/var/spool/storage/SD_DISK`), uploads every file whose mtime is at least
+  `MIN_AGE_SECONDS` (120 s, hardcoded — see below) old, skipping chunks
+  still being written, that is not already recorded in the local state
+  file. This includes non-video artifacts the camera keeps alongside
+  recordings (e.g. `index.db`) — everything under `RecordingPath` ends up
+  in the bucket, not just `.mkv` files. Upload once, keep on SD; the
+  camera's own FIFO cleanup reclaims space.
 - **State**: `/usr/local/packages/sds3sync/localdata/uploaded.txt`, one
   `size<TAB>relative-path` line per uploaded file, mirrored into an in-memory
   hash table (relative path → size) loaded at startup. Delete the file and
@@ -120,14 +122,11 @@ behaves on this camera).
 | `RecordingPath` | `/var/spool/storage/SD_DISK` | Directory tree to sync |
 | `IntervalSeconds` | `60` | Sync pass cadence (clamped to ≥ 10) |
 
-Two things are hardcoded in `sdsync.c` rather than exposed as parameters,
-both for the same reason — they're not operational choices, and a
-misconfigured value fails silently (zero uploads, indistinguishable from "no
-new recordings"), so they're not worth exposing as something to get wrong:
+One thing is hardcoded in `sdsync.c` rather than exposed as a parameter —
+it's not an operational choice, and a misconfigured value fails silently
+(zero uploads, indistinguishable from "no new recordings"), so it's not
+worth exposing as something to get wrong:
 
-- **`RECORDING_EXTENSION`** (`.mkv`) — dictated by the camera's own
-  recording engine. If this app is ever installed on a camera generation
-  that writes a different container format, change the constant and rebuild.
 - **`MIN_AGE_SECONDS`** (`120`) — a safety margin against the recording
   pipeline's own chunking/flush behavior, not something that should vary by
   deployment.
