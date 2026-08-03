@@ -8,6 +8,11 @@
  * A tick that fires while a pass is still running is skipped. Files are
  * never deleted from the SD card — the camera's own FIFO cleanup reclaims
  * space.
+ *
+ * A second, independent timer (HeartbeatIntervalSeconds, default 300)
+ * uploads a small camera-status JSON object so off-site monitoring has a
+ * liveness/health signal, since this camera is otherwise unreachable
+ * off-site (see README).
  */
 #include <glib-unix.h>
 #include <glib.h>
@@ -34,6 +39,7 @@ typedef struct {
     gchar *prefix;
     gchar *recording_path;
     gint interval;
+    gint heartbeat_interval;
     gboolean path_style;
     gboolean insecure;
 } Config;
@@ -42,7 +48,22 @@ static Config cfg;
 static GMainLoop *loop;
 static GHashTable *uploaded; /* rel path (owned) -> size string (owned) */
 static gchar *state_path;
+static gchar *heartbeat_path;
+static gchar *app_version;
+static time_t app_start_time;
 static gint sync_running = 0;
+static gint heartbeat_running = 0;
+
+/* Published by sync_thread after each pass, read by the heartbeat thread.
+ * These run on genuinely separate GThreads, so this needs a real mutex
+ * rather than per-field atomics -- the heartbeat needs a consistent
+ * snapshot of all four fields together. */
+static GMutex last_pass_lock;
+static struct {
+    gboolean has_run;
+    time_t   time;
+    guint    uploaded, skipped, failed, tracked_files;
+} last_pass;
 
 /* ------------------------------------------------------------------ */
 /* Config                                                              */
@@ -134,6 +155,12 @@ static gboolean load_config(void)
         cfg.interval = 10; /* protect against hammering the SD card */
     g_free(iv);
 
+    gchar *hiv = paramstore_get(ps, "HeartbeatIntervalSeconds", "300");
+    cfg.heartbeat_interval = atoi(hiv);
+    if (cfg.heartbeat_interval < 10)
+        cfg.heartbeat_interval = 10; /* protect against hammering */
+    g_free(hiv);
+
     gchar *path_style_str = paramstore_get(ps, "S3PathStyle", "yes");
     cfg.path_style = param_yes(path_style_str);
     g_free(path_style_str);
@@ -160,6 +187,40 @@ static gboolean load_config(void)
         return FALSE;
     }
     return TRUE;
+}
+
+/* No version string is compiled into the binary -- manifest.json is the
+ * single source of truth. Read it once at startup rather than hand-
+ * duplicating the version as a second #define that can drift out of sync
+ * with it (this bit us once already: two different builds both labeled
+ * 0.9.3). Falls back to "unknown" rather than failing if it can't be read. */
+static gchar *read_app_version(void)
+{
+    const char *env_path = g_getenv("SDS3SYNC_MANIFEST_PATH");
+    gchar *manifest_path = env_path != NULL
+        ? g_strdup(env_path)
+        : g_strdup_printf("/usr/local/packages/%s/manifest.json", APP_NAME);
+
+    gchar *content = NULL;
+    gchar *version = NULL;
+    if (g_file_get_contents(manifest_path, &content, NULL, NULL)) {
+        const gchar *key = strstr(content, "\"version\"");
+        if (key != NULL) {
+            const gchar *colon = strchr(key, ':');
+            const gchar *q1 = colon ? strchr(colon, '"') : NULL;
+            const gchar *q2 = q1 ? strchr(q1 + 1, '"') : NULL;
+            if (q1 != NULL && q2 != NULL && q2 > q1)
+                version = g_strndup(q1 + 1, (gsize)(q2 - q1 - 1));
+        }
+        g_free(content);
+    }
+    g_free(manifest_path);
+
+    if (version == NULL) {
+        syslog(LOG_WARNING, "could not read app version from manifest.json");
+        version = g_strdup("unknown");
+    }
+    return version;
 }
 
 /* ------------------------------------------------------------------ */
@@ -306,6 +367,10 @@ static gchar *urlencode_key(const char *key)
  * everything ever uploaded; skip syncing this one. */
 #define EXCLUDED_FILENAME "index.db"
 
+/* Fixed heartbeat object name -- a protocol detail, not a per-deployment
+ * choice, so hardcoded like MIN_AGE_SECONDS/EXCLUDED_FILENAME above. */
+#define STATUS_OBJECT_NAME "status.json"
+
 struct pass_stats {
     guint uploaded;
     guint skipped;
@@ -398,9 +463,8 @@ static void scan_dir(const gchar *dir, time_t now, const S3Cfg *s3,
     g_dir_close(d);
 }
 
-static gpointer sync_thread(gpointer data)
+static S3Cfg build_s3cfg(void)
 {
-    (void)data;
     S3Cfg s3 = {
         .endpoint = cfg.endpoint,
         .bucket = cfg.bucket,
@@ -410,6 +474,13 @@ static gpointer sync_thread(gpointer data)
         .path_style = cfg.path_style,
         .insecure = cfg.insecure,
     };
+    return s3;
+}
+
+static gpointer sync_thread(gpointer data)
+{
+    (void)data;
+    S3Cfg s3 = build_s3cfg();
     struct pass_stats st = { 0, 0, 0, 0 };
     time_t start = time(NULL);
     scan_dir(cfg.recording_path, start, &s3, &st);
@@ -418,6 +489,16 @@ static gpointer sync_thread(gpointer data)
                "sync pass done in %lds: %u uploaded, %u already synced, "
                "%u failed",
                (long)(time(NULL) - start), st.uploaded, st.skipped, st.failed);
+
+    g_mutex_lock(&last_pass_lock);
+    last_pass.has_run = TRUE;
+    last_pass.time = time(NULL);
+    last_pass.uploaded = st.uploaded;
+    last_pass.skipped = st.skipped;
+    last_pass.failed = st.failed;
+    last_pass.tracked_files = g_hash_table_size(uploaded);
+    g_mutex_unlock(&last_pass_lock);
+
     g_atomic_int_set(&sync_running, 0);
     return NULL;
 }
@@ -429,6 +510,97 @@ static void trigger_sync(const char *why)
         return;
     }
     GThread *t = g_thread_new("sync", sync_thread, NULL);
+    g_thread_unref(t);
+}
+
+/* ------------------------------------------------------------------ */
+/* Heartbeat: periodic camera-status upload, independent of the sync   */
+/* pass above -- see README for the payload schema and why the S3 key  */
+/* is always overwritten (unlike index.db, this is fresh self-        */
+/* generated data each tick, so overwrite is the correct semantics).   */
+/* ------------------------------------------------------------------ */
+
+static void send_heartbeat_once(void)
+{
+    S3Cfg s3 = build_s3cfg();
+
+    g_mutex_lock(&last_pass_lock);
+    gboolean has_run = last_pass.has_run;
+    time_t pass_time = last_pass.time;
+    guint pass_uploaded = last_pass.uploaded;
+    guint pass_skipped = last_pass.skipped;
+    guint pass_failed = last_pass.failed;
+    guint tracked_files = last_pass.tracked_files;
+    g_mutex_unlock(&last_pass_lock);
+
+    time_t now = time(NULL);
+    struct tm tm_now;
+    gmtime_r(&now, &tm_now);
+    char now_buf[32];
+    strftime(now_buf, sizeof(now_buf), "%Y-%m-%dT%H:%M:%SZ", &tm_now);
+
+    gchar *last_pass_json;
+    if (has_run) {
+        struct tm tm_pass;
+        gmtime_r(&pass_time, &tm_pass);
+        char pass_buf[32];
+        strftime(pass_buf, sizeof(pass_buf), "%Y-%m-%dT%H:%M:%SZ", &tm_pass);
+        last_pass_json = g_strdup_printf(
+            "{\"time\":\"%s\",\"uploaded\":%u,\"skipped\":%u,\"failed\":%u}",
+            pass_buf, pass_uploaded, pass_skipped, pass_failed);
+    } else {
+        last_pass_json = g_strdup("null");
+    }
+
+    gchar *payload = g_strdup_printf(
+        "{\"prefix\":\"%s\",\"app_version\":\"%s\",\"timestamp\":\"%s\","
+        "\"uptime_seconds\":%ld,\"last_sync_pass\":%s,\"tracked_files\":%u}",
+        cfg.prefix, app_version, now_buf, (long)(now - app_start_time),
+        last_pass_json, tracked_files);
+    g_free(last_pass_json);
+
+    GError *werr = NULL;
+    if (!g_file_set_contents(heartbeat_path, payload, -1, &werr)) {
+        syslog(LOG_WARNING, "heartbeat: cannot write %s: %s", heartbeat_path,
+               werr ? werr->message : "unknown error");
+        g_clear_error(&werr);
+        g_free(payload);
+        return;
+    }
+
+    gchar *key_plain = g_strconcat(cfg.prefix, STATUS_OBJECT_NAME, NULL);
+    gchar *key_enc = urlencode_key(key_plain);
+    long code = 0;
+    char errbuf[512];
+    int rc = s3_put_file(&s3, key_enc, heartbeat_path,
+                         (gint64)strlen(payload), &code, errbuf, sizeof(errbuf));
+    if (rc == 0)
+        syslog(LOG_INFO, "heartbeat sent");
+    else
+        syslog(LOG_WARNING, "heartbeat upload failed (HTTP %ld): %s", code,
+               errbuf);
+
+    g_free(key_plain);
+    g_free(key_enc);
+    g_free(payload);
+}
+
+static gpointer heartbeat_thread(gpointer data)
+{
+    (void)data;
+    send_heartbeat_once();
+    g_atomic_int_set(&heartbeat_running, 0);
+    return NULL;
+}
+
+static void trigger_heartbeat(const char *why)
+{
+    if (!g_atomic_int_compare_and_exchange(&heartbeat_running, 0, 1)) {
+        syslog(LOG_DEBUG, "heartbeat already running, skipping trigger (%s)",
+               why);
+        return;
+    }
+    GThread *t = g_thread_new("heartbeat", heartbeat_thread, NULL);
     g_thread_unref(t);
 }
 
@@ -448,6 +620,20 @@ static gboolean on_timer(gpointer data)
     return G_SOURCE_CONTINUE;
 }
 
+static gboolean initial_heartbeat(gpointer data)
+{
+    (void)data;
+    trigger_heartbeat("startup");
+    return G_SOURCE_REMOVE;
+}
+
+static gboolean on_heartbeat_timer(gpointer data)
+{
+    (void)data;
+    trigger_heartbeat("timer");
+    return G_SOURCE_CONTINUE;
+}
+
 static gboolean on_quit_signal(gpointer data)
 {
     (void)data;
@@ -459,6 +645,8 @@ int main(void)
 {
     openlog(APP_NAME, LOG_PID, LOG_USER);
     syslog(LOG_INFO, "starting");
+    app_start_time = time(NULL);
+    app_version = read_app_version();
 
     /* SDS3SYNC_STATE_PATH lets integration tests point this at a scratch
      * file instead of a root-owned system path; unset in production, so
@@ -471,9 +659,27 @@ int main(void)
             "/usr/local/packages/%s/localdata/uploaded.txt", APP_NAME);
     }
 
+    /* SDS3SYNC_HEARTBEAT_PATH mirrors SDS3SYNC_STATE_PATH above, same
+     * reason (scratch path for integration tests). */
+    const char *env_heartbeat_path = g_getenv("SDS3SYNC_HEARTBEAT_PATH");
+    if (env_heartbeat_path != NULL) {
+        heartbeat_path = g_strdup(env_heartbeat_path);
+    } else {
+        heartbeat_path = g_strdup_printf(
+            "/usr/local/packages/%s/localdata/status.json", APP_NAME);
+    }
+
     gboolean configured = load_config();
     load_state();
     reconcile_state("startup"); /* prune cruft accumulated across restarts */
+
+    /* seed tracked_files so a heartbeat firing before the first sync pass
+     * completes still reports a meaningful count; last_sync_pass itself
+     * stays null (has_run is FALSE) until a real pass finishes */
+    g_mutex_lock(&last_pass_lock);
+    last_pass.tracked_files = g_hash_table_size(uploaded);
+    g_mutex_unlock(&last_pass_lock);
+
     curl_global_init(CURL_GLOBAL_ALL);
 
     loop = g_main_loop_new(NULL, FALSE);
@@ -485,6 +691,13 @@ int main(void)
         g_timeout_add_seconds(15, initial_sync, NULL);
         g_timeout_add_seconds((guint)cfg.interval, on_timer, NULL);
         syslog(LOG_INFO, "timer armed: sync pass every %d s", cfg.interval);
+
+        /* staggered vs. the sync pass's own 15s initial delay, so both
+         * don't hit the network in the same instant at startup */
+        g_timeout_add_seconds(5, initial_heartbeat, NULL);
+        g_timeout_add_seconds((guint)cfg.heartbeat_interval,
+                              on_heartbeat_timer, NULL);
+        syslog(LOG_INFO, "heartbeat armed: every %d s", cfg.heartbeat_interval);
     } else {
         /* stay alive so the parameter page works; user restarts app after
          * configuring */

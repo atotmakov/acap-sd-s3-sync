@@ -109,6 +109,35 @@ required — the system converges on its own.
   via libcurl (no file buffering in RAM). A pass aborts after 3 consecutive
   failures and retries on the next timer tick. One pass runs at a time;
   overlapping ticks are skipped.
+- **Heartbeat**: since the camera is outbound-only and unreachable from
+  off-site, there's no way to ask it directly whether it's alive or how its
+  last sync pass went. A second, independent timer (`HeartbeatIntervalSeconds`,
+  default 300 s; first heartbeat 5 s after start) uploads a small JSON status
+  object to `<Prefix>status.json`, e.g.:
+  ```json
+  {
+    "prefix": "axis-b8a44f6c2746/",
+    "app_version": "0.9.5",
+    "timestamp": "2026-08-03T22:18:23Z",
+    "uptime_seconds": 12345,
+    "last_sync_pass": {
+      "time": "2026-08-03T22:18:31Z",
+      "uploaded": 3,
+      "skipped": 1910,
+      "failed": 0
+    },
+    "tracked_files": 1913
+  }
+  ```
+  `last_sync_pass` is `null` until the first sync pass since app start
+  completes. This key is always overwritten — unlike the `index.db`
+  exclusion above, that's correct here: this is fresh data the app
+  generates itself each tick, not a mirror of an externally-shrinking
+  structure, so "latest overwrites previous" is exactly the right semantics
+  for a status snapshot. A failed heartbeat upload just logs a warning and
+  retries next tick — no abort/backoff, unlike the sync pass's 3-failure
+  abort (a missed status update isn't as consequential as a missed
+  recording upload).
 
 ## Parameters (Apps → SD to S3 Sync → Settings)
 
@@ -127,6 +156,7 @@ behaves on this camera).
 | `Prefix` | *(empty — auto-derived)* | Object key prefix. If empty on first run, derived from `/etc/hostname` (falls back to `axis-<eth0 MAC>` if unreadable) and **persisted back** to this parameter — check the app's Settings page after first start to see what it picked, or set it explicitly to override. |
 | `RecordingPath` | `/var/spool/storage/SD_DISK` | Directory tree to sync |
 | `IntervalSeconds` | `60` | Sync pass cadence (clamped to ≥ 10) |
+| `HeartbeatIntervalSeconds` | `300` | Camera-status upload cadence (clamped to ≥ 10) |
 
 Two things are hardcoded in `sdsync.c` rather than exposed as parameters,
 both for the same reason — they're not operational choices, and a
@@ -139,6 +169,8 @@ new recordings"), so they're not worth exposing as something to get wrong:
 - **`EXCLUDED_FILENAME`** (`index.db`) — the camera's own index of what's
   currently on the SD card; see the Sync pass note above for why it's never
   synced.
+- **`STATUS_OBJECT_NAME`** (`status.json`) — the heartbeat's fixed object
+  name, a protocol detail rather than something to vary per deployment.
 
 The app starts idle if `S3Endpoint`/`S3AccessKey`/`S3SecretKey` are unset —
 configure them, then restart the app.

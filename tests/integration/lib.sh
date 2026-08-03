@@ -66,6 +66,15 @@ bucket_has_object() {
     mc stat "sds3sync-it/$MINIO_BUCKET/$key" >/dev/null 2>&1
 }
 
+# Fetches an object's body to stdout -- used to inspect heartbeat/status
+# payload content, not just existence (bucket_has_object) or count
+# (bucket_object_count).
+bucket_get_object() {
+    local key="$1"
+    mc_alias
+    mc cat "sds3sync-it/$MINIO_BUCKET/$key" 2>/dev/null
+}
+
 # Seed a synthetic .mkv file with a backdated mtime (default: 10 minutes
 # in the past, well past MIN_AGE_SECONDS=120) so the daemon considers it
 # finished immediately -- no idle sleep needed anywhere in the tests, and
