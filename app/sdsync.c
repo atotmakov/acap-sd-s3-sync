@@ -298,6 +298,14 @@ static gchar *urlencode_key(const char *key)
  * silently risk uploading partial files. */
 #define MIN_AGE_SECONDS 120
 
+/* index.db reflects the SD card's *current* contents and is rewritten in
+ * place as the camera's FIFO cleanup rotates recordings out. The S3 bucket
+ * is a strict superset that never shrinks, so mirroring this file would
+ * erase index entries for recordings still in the bucket but no longer on
+ * the card. The bucket's own object listing is already a complete index of
+ * everything ever uploaded; skip syncing this one. */
+#define EXCLUDED_FILENAME "index.db"
+
 struct pass_stats {
     guint uploaded;
     guint skipped;
@@ -327,6 +335,10 @@ static void scan_dir(const gchar *dir, time_t now, const S3Cfg *s3,
         }
         if (g_file_test(full, G_FILE_TEST_IS_DIR)) {
             scan_dir(full, now, s3, st);
+            g_free(full);
+            continue;
+        }
+        if (strcmp(name, EXCLUDED_FILENAME) == 0) {
             g_free(full);
             continue;
         }

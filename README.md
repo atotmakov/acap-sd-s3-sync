@@ -65,9 +65,15 @@ required — the system converges on its own.
   `MIN_AGE_SECONDS` (120 s, hardcoded — see below) old, skipping chunks
   still being written, that is not already recorded in the local state
   file. This includes non-video artifacts the camera keeps alongside
-  recordings (e.g. `index.db`) — everything under `RecordingPath` ends up
-  in the bucket, not just `.mkv` files. Upload once, keep on SD; the
-  camera's own FIFO cleanup reclaims space.
+  recordings, not just `.mkv` files — with one exception: `index.db`
+  (hardcoded — see below), the camera's own index of what's *currently* on
+  the SD card, is never synced. That index shrinks as the camera's FIFO
+  cleanup rotates old recordings off the card, while the bucket is a strict
+  superset that never shrinks — mirroring it would erase index entries for
+  recordings still in the bucket but no longer on the card. The bucket's own
+  object listing is already a complete, ever-growing index of everything
+  uploaded. Upload once, keep on SD; the camera's own FIFO cleanup reclaims
+  space.
 - **State**: `/usr/local/packages/sds3sync/localdata/uploaded.txt`, one
   `size<TAB>relative-path` line per uploaded file, mirrored into an in-memory
   hash table (relative path → size) loaded at startup. Delete the file and
@@ -122,14 +128,17 @@ behaves on this camera).
 | `RecordingPath` | `/var/spool/storage/SD_DISK` | Directory tree to sync |
 | `IntervalSeconds` | `60` | Sync pass cadence (clamped to ≥ 10) |
 
-One thing is hardcoded in `sdsync.c` rather than exposed as a parameter —
-it's not an operational choice, and a misconfigured value fails silently
-(zero uploads, indistinguishable from "no new recordings"), so it's not
-worth exposing as something to get wrong:
+Two things are hardcoded in `sdsync.c` rather than exposed as parameters,
+both for the same reason — they're not operational choices, and a
+misconfigured value fails silently (zero uploads, indistinguishable from "no
+new recordings"), so they're not worth exposing as something to get wrong:
 
 - **`MIN_AGE_SECONDS`** (`120`) — a safety margin against the recording
   pipeline's own chunking/flush behavior, not something that should vary by
   deployment.
+- **`EXCLUDED_FILENAME`** (`index.db`) — the camera's own index of what's
+  currently on the SD card; see the Sync pass note above for why it's never
+  synced.
 
 The app starts idle if `S3Endpoint`/`S3AccessKey`/`S3SecretKey` are unset —
 configure them, then restart the app.

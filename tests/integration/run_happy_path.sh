@@ -29,6 +29,12 @@ for i in $(seq 1 "$N"); do
     seed_recording "$RECORDING_DIR" "clip_$i.mkv"
 done
 
+# index.db is the camera's own live index of what's currently on the SD
+# card, rewritten in place as recordings are added/removed. It must never
+# be synced (see README: mirroring it onto S3 would erase index entries for
+# recordings still in the bucket but rotated off the card).
+seed_recording "$RECORDING_DIR" "index.db"
+
 PID=$(start_daemon "happy-path" "$RECORDING_DIR" 3)
 log "daemon started, pid=$PID"
 
@@ -41,13 +47,17 @@ fi
 
 sleep 2 # let the last pass's uploads settle
 COUNT=$(bucket_object_count)
+INDEX_SYNCED=0
+if bucket_has_object "happy-path/index.db"; then
+    INDEX_SYNCED=1
+fi
 stop_daemon "$PID"
 
-if [ "$COUNT" -eq "$N" ]; then
-    log "PASS: all $N synthetic recordings landed in the bucket"
+if [ "$COUNT" -eq "$N" ] && [ "$INDEX_SYNCED" -eq 0 ]; then
+    log "PASS: all $N synthetic recordings landed in the bucket, index.db excluded"
     exit 0
 else
-    log "FAIL: expected $N objects in bucket, found $COUNT"
+    log "FAIL: expected $N objects in bucket (found $COUNT), index.db excluded (synced=$INDEX_SYNCED)"
     dump_logs "$PID"
     exit 1
 fi
