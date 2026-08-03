@@ -117,6 +117,7 @@ EOF
     # daemon_syslog() below, filtered by this PID.
     SDS3SYNC_PARAM_FILE="$param_file" \
     SDS3SYNC_STATE_PATH="$run_dir/uploaded.txt" \
+    SDS3SYNC_HEARTBEAT_PATH="$run_dir/status.json" \
         "$APP_DIR/sds3sync-host" > "$run_dir/crash.log" 2>&1 &
     local pid=$!
     echo "$pid" > "$run_dir/pid"
@@ -132,6 +133,7 @@ restart_daemon() {
 
     SDS3SYNC_PARAM_FILE="$param_file" \
     SDS3SYNC_STATE_PATH="$run_dir/uploaded.txt" \
+    SDS3SYNC_HEARTBEAT_PATH="$run_dir/status.json" \
         "$APP_DIR/sds3sync-host" >> "$run_dir/crash.log" 2>&1 &
     local pid=$!
     echo "$pid" > "$run_dir/pid"
